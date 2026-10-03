@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Six dataset-specific joint UMAPs, following the mHSC-L all-cell workflow.
+
+Each panel fits its own scaler, PCA, and UMAP to its observed early,
+intermediate, late, and scGPT-predicted late-like cells. Coordinates must not
+be compared across panels as a shared embedding.
+"""
+
+from __future__ import annotations
+
+import gc
+import json
+import sys
+from pathlib import Path
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import umap
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch
+from matplotlib.ticker import MaxNLocator
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+from audit_panel_alignment import require_matplotlib_panel_alignment
+
+
+ROOT = Path("/mnt/10T/yzn/benchmark_GRN")
+SCGPT_REPO = ROOT / "pre_scgpt/scGPT"
+MODEL_DIR = SCGPT_REPO / "scgpt_human"
+SOURCE_DIR = ROOT / "pre_scgpt/0204code/Pseudotime_trajectory_plots_umap"
+OUTDIR = SOURCE_DIR / "six_dataset_joint_umap"
+OUTPUT = OUTDIR / "scGPT_allcells_joint_umap_six_datasets_2x3"
+DATASETS = ("hESC", "hHep", "mHSC-E", "mHSC-GM", "mHSC-L", "mDC")
+PT_QUANTILE = 0.2
+GEN_ITERS = 16
+BATCH_SIZE = 16
+EMA_ALPHA = 0.1
+SEED = 42
+COLORS = {
+    "early": "#E69F00",
+    "late": "#4EA3F1",
+    "pred": "#FF9A3D",
+    "middle": "#9B9B9B",
+}
+
+sys.path.insert(0, str(SCGPT_REPO))
+from scgpt.model import TransformerModel  # noqa: E402
+from scgpt.tokenizer.gene_tokenizer import GeneVocab  # noqa: E402
+
+
+def bin_expr_to_0_50(x: np.ndarray) -> np.ndarray:
+    x = np.nan_to_num(np.asarray(x, dtype=np.float32), nan=0.0)
+    x = np.clip(x, 0, None)
+    vmax = max(float(np.percentile(x, 99.5)), 1e-6)
+    return np.clip(x / vmax * 50.0, 0, 50).astype(np.float32)
+
+
+def load_model(device: torch.device) -> tuple[TransformerModel, GeneVocab]:
+    with (MODEL_DIR / "args.json").open(encoding="utf-8") as handle:
+        cfg = json.load(handle)
+    vocab = GeneVocab.from_file(MODEL_DIR / "vocab.json")
+    for token in ("<pad>", "<cls>", "<eoc>"):
+        if token not in vocab:
+            vocab.append_token(token)
+    model = TransformerModel(
+        ntoken=len(vocab), d_model=cfg["embsize"], nhead=cfg["nheads"],
+        d_hid=cfg["d_hid"], nlayers=cfg["nlayers"], vocab=vocab,
+        pad_value=cfg["pad_value"], n_input_bins=cfg.get("n_bins", 51),
+        use_fast_transformer=cfg.get("fast_transformer", True),
+    )
+    checkpoint = torch.load(MODEL_DIR / "best_model.pt", map_location="cpu")
+    model.load_state_dict(checkpoint, strict=False)
+    model = model.to(device).eval()
+    if device.type == "cuda":
+        model.half()
+    return model, vocab
+
+
+@torch.no_grad()
+def generate_per_cell(
+    model: TransformerModel, vocab: GeneVocab, x_early: np.ndarray,
+    genes: list[str], device: torch.device, dataset: str,
+) -> np.ndarray:
+    gene_names = [gene.upper() for gene in genes]
+    gene_ids = np.array([vocab[g] if g in vocab else vocab["<pad>"] for g in gene_names])
+    gene_ids = np.concatenate([[vocab["<cls>"]], gene_ids])
+    gene_ids_tensor = torch.tensor(gene_ids[None, :], dtype=torch.long)
+    x_in = np.concatenate([np.zeros((len(x_early), 1), dtype=np.float32), x_early], axis=1)
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    vals_all = torch.tensor(x_in, dtype=dtype)
+    pad_mask = gene_ids_tensor.eq(vocab["<pad>"]).expand(len(x_early), -1)
+    update_mask = torch.ones((1, len(gene_ids)), dtype=torch.bool, device=device)
+    update_mask[:, 0] = False
+
+    for iteration in range(GEN_ITERS):
+        for start in range(0, len(vals_all), BATCH_SIZE):
+            end = min(start + BATCH_SIZE, len(vals_all))
+            batch_size = end - start
+            vals = vals_all[start:end].to(device)
+            src = gene_ids_tensor.expand(batch_size, -1).to(device)
+            mask = pad_mask[start:end].to(device)
+            freeze = mask | (~update_mask.expand(batch_size, -1))
+            predicted = model(src=src, values=vals, src_key_padding_mask=mask)["mlm_output"]
+            vals = torch.where(freeze, vals, EMA_ALPHA * vals + (1.0 - EMA_ALPHA) * predicted)
+            vals_all[start:end] = vals.detach().cpu()
+        print(f"{dataset}: iteration {iteration + 1}/{GEN_ITERS}", flush=True)
+    return vals_all[:, 1:].float().numpy()
+
+
+def load_dataset(dataset: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
+    expr_path = ROOT / "input_process/CHIP" / f"{dataset}_chip_matched-ExpressionData.csv"
+    pt_path = ROOT / "PseudoTime" / dataset / "PseudoTime.csv"
+    expr = pd.read_csv(expr_path, index_col=0)
+    pt_frame = pd.read_csv(pt_path)
+    pt_frame = pt_frame.rename(
+        columns={pt_frame.columns[0]: "cell", pt_frame.columns[1]: "pt"}
+    ).set_index("cell")
+    common = expr.columns.intersection(pt_frame.index)
+    if not len(common):
+        raise ValueError(f"{dataset}: no shared expression/pseudotime cell IDs")
+    expr = expr[common]
+    pt = pd.to_numeric(pt_frame.loc[common, "pt"], errors="coerce").to_numpy(float)
+    valid = np.isfinite(pt)
+    invalid_count = int((~valid).sum())
+    expr, pt = expr.loc[:, valid], pt[valid]
+    if len(pt) < 10:
+        raise ValueError(f"{dataset}: too few valid pseudotime cells")
+    genes = expr.index.astype(str).tolist()
+    x_all = bin_expr_to_0_50(expr.T.to_numpy(dtype=np.float32))
+    lo, hi = np.quantile(pt, [PT_QUANTILE, 1.0 - PT_QUANTILE])
+    early_mask, late_mask = pt <= lo, pt >= hi
+    if np.any(early_mask & late_mask):
+        raise ValueError(f"{dataset}: early and late masks overlap")
+    middle_mask = ~(early_mask | late_mask)
+    summary = {
+        "dataset": dataset, "input_cells": int(len(common)),
+        "invalid_pseudotime_cells": invalid_count, "valid_cells": int(len(pt)),
+        "genes": len(genes), "early": int(early_mask.sum()),
+        "middle": int(middle_mask.sum()), "late": int(late_mask.sum()),
+        "quantile": PT_QUANTILE, "early_threshold": float(lo),
+        "late_threshold": float(hi),
+    }
+    return x_all[early_mask], x_all[middle_mask], x_all[late_mask], genes, summary
+
+
+def get_prediction(
+    dataset: str, x_early: np.ndarray, genes: list[str],
+    device: torch.device, state: dict,
+) -> np.ndarray:
+    if dataset == "mHSC-L":
+        path = SOURCE_DIR / "mHSC-L_scgpt_early_trueLate_predLate_joint_umap_predicted_cells.npy"
+        source = "existing original mHSC-L prediction"
+    else:
+        path = OUTDIR / f"{dataset}_scgpt_early_to_latelike_predicted_cells.npy"
+        source = "cached prediction" if path.exists() else "new prediction"
+    if path.exists():
+        x_pred = np.load(path).astype(np.float32)
+    else:
+        if "model" not in state:
+            state["model"], state["vocab"] = load_model(device)
+        x_pred = generate_per_cell(state["model"], state["vocab"], x_early, genes, device, dataset)
+        np.save(path, x_pred)
+    if x_pred.shape != x_early.shape or not np.isfinite(x_pred).all():
+        raise ValueError(f"{dataset}: invalid prediction shape or nonfinite values: {x_pred.shape}")
+    print(f"{dataset}: {source}; prediction shape={x_pred.shape}", flush=True)
+    return x_pred
+
+
+def embed_dataset(dataset: str, device: torch.device, state: dict) -> None:
+    cache = OUTDIR / f"{dataset}_joint_umap_coordinates.npz"
+    x_early, x_middle, x_late, genes, summary = load_dataset(dataset)
+    x_pred = get_prediction(dataset, x_early, genes, device, state)
+    combined = np.vstack([x_early, x_middle, x_late, x_pred]).astype(np.float32)
+    scaled = StandardScaler().fit_transform(combined)
+    n_pcs = min(50, scaled.shape[0] - 1, scaled.shape[1])
+    pcs = PCA(n_components=n_pcs, random_state=SEED).fit_transform(scaled)
+    embedding = umap.UMAP(
+        n_neighbors=15, min_dist=0.1, n_components=2,
+        metric="euclidean", random_state=SEED, n_jobs=1,
+    ).fit_transform(pcs)
+    n_early, n_middle, n_late = len(x_early), len(x_middle), len(x_late)
+    i1, i2, i3 = n_early, n_early + n_middle, n_early + n_middle + n_late
+    middle = embedding[i1:i2].copy()
+    clouds = {
+        "early": embedding[:i1].copy(),
+        "late": embedding[i2:i3].copy(),
+        "pred": embedding[i3:].copy(),
+    }
+    np.savez_compressed(cache, early=clouds["early"], middle=middle,
+                        late=clouds["late"], pred=clouds["pred"])
+    with (OUTDIR / f"{dataset}_data_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, indent=2)
+    print(f"{dataset}: cells={summary['valid_cells']} genes={summary['genes']} "
+          f"early={n_early} middle={n_middle} late={n_late} pred={len(x_pred)}", flush=True)
+
+
+def plot_panel(ax: plt.Axes, dataset: str) -> None:
+    with np.load(OUTDIR / f"{dataset}_joint_umap_coordinates.npz") as cached:
+        clouds = {label: cached[label].copy() for label in ("early", "middle", "late", "pred")}
+    centers = {label: clouds[label].mean(axis=0) for label in ("early", "late", "pred")}
+    middle = clouds["middle"]
+    ax.scatter(middle[:, 0], middle[:, 1], s=19, alpha=0.38,
+               color=COLORS["middle"], edgecolors="none", rasterized=True, zorder=0)
+    start = centers["early"]
+    for target_label, curvature in (("late", -0.16), ("pred", 0.16)):
+        target_cloud = clouds[target_label]
+        # Terminate at an observed target cell rather than a projected radius;
+        # elongated/disconnected clouds can otherwise leave the arrow in space.
+        target_edge = target_cloud[np.argmin(np.linalg.norm(target_cloud - start, axis=1))]
+        ax.add_patch(FancyArrowPatch(
+            start, target_edge, connectionstyle=f"arc3,rad={curvature}",
+            arrowstyle="-|>", mutation_scale=15, linewidth=2.3,
+            color=COLORS[target_label], alpha=0.88,
+            shrinkA=12, shrinkB=4, zorder=1,
+        ))
+    for label in ("early", "late", "pred"):
+        cloud = clouds[label]
+        ax.scatter(cloud[:, 0], cloud[:, 1], s=34, alpha=0.78,
+                   color=COLORS[label], edgecolors="none", rasterized=True, zorder=2)
+        center = centers[label]
+        ax.scatter(center[0], center[1], s=135, marker="X", color=COLORS[label],
+                   edgecolors="white", linewidths=1.0, zorder=5)
+    ax.set_title(dataset, fontsize=16, pad=8, loc="left")
+    ax.set_xlabel("UMAP 1", fontsize=16)
+    ax.set_ylabel("UMAP 2", fontsize=16)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.tick_params(axis="both", which="both", labelsize=14, length=0)
+    ax.margins(x=0.025, y=0.025)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(1.4)
+    ax.spines["bottom"].set_linewidth(1.4)
+
+
+def plot_composite() -> None:
+    mpl.rcParams.update({
+        "font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"],
+        "pdf.fonttype": 42,
+        "svg.fonttype": "none", "axes.unicode_minus": False,
+    })
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10), dpi=300)
+    for ax, dataset in zip(axes.flat, DATASETS):
+        plot_panel(ax, dataset)
+    handles = [
+        Line2D([], [], linestyle="none", marker="o", markersize=8,
+               color=COLORS[label], label=title)
+        for label, title in (
+            ("middle", "Observed Intermediate cells"),
+            ("early", "Observed Early cells"),
+            ("late", "Observed Late cells"),
+            ("pred", "Predicted Late cells"),
+        )
+    ]
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.985),
+               ncol=4, frameon=False, fontsize=14, handletextpad=0.35,
+               columnspacing=1.6)
+    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.075,
+                        top=0.89, wspace=0.23, hspace=0.34)
+    fig.canvas.draw()
+    require_matplotlib_panel_alignment(
+        fig, json_out=str(OUTPUT) + ".alignment.json",
+        overlay_svg=str(OUTPUT) + ".alignment.svg",
+        tolerance_pt=1.5, gutter_tolerance_pt=1.5,
+        require_panel_labels=False, strict=True,
+    )
+    fig.savefig(OUTPUT.with_suffix(".pdf"), dpi=300)
+    fig.savefig(OUTPUT.with_suffix(".png"), dpi=300)
+    plt.close(fig)
+    print(f"saved={OUTPUT.with_suffix('.pdf')}", flush=True)
+
+
+def main() -> None:
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.set_num_threads(2)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda":
+        raise RuntimeError("GPU is unavailable; refusing to run slow CPU scGPT inference")
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    state: dict = {}
+    print(f"device={device}; datasets={','.join(DATASETS)}", flush=True)
+    for dataset in DATASETS:
+        embed_dataset(dataset, device, state)
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    plot_composite()
+
+
+if __name__ == "__main__":
+    main()
