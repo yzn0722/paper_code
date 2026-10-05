@@ -4,10 +4,14 @@
 绘制 Random 和 Weight 两个模型在 top30 数据集上的平衡准确率对比柱状图
 """
 
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import glob
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -20,6 +24,17 @@ plt.rcParams.update({"pdf.fonttype": 42, "svg.fonttype": "none"})
 
 # Match the 8 x 6 inch plotting canvas used by weight.py.
 FIGURE_SIZE_IN = (8, 6)
+DEFAULT_RANDOM_RESULTS_DIR = Path(
+    "/mnt/10T/yzn/scGRN-Bench/FBplot/fig5/"
+    "results_multidataset_pseudotime_227_random_seeded_20260929"
+)
+DEFAULT_WEIGHT_RESULTS_DIR = Path(
+    "/mnt/10T/yzn/benchmark_GRN/pre_scgpt/results_multidataset_pseudotime_227"
+)
+DEFAULT_OUTPUT_PDF = Path(__file__).resolve().with_name(
+    "top30_balanced_accuracy_seeded10.pdf"
+)
+EXPECTED_SEEDS = tuple(range(1, 11))
 
 def calculate_metrics(file_path, use_top30=True, top_percent=0.3):
     """计算单个文件的平衡准确率。
@@ -61,21 +76,64 @@ def calculate_metrics(file_path, use_top30=True, top_percent=0.3):
             recalls.append(float((pred_labels[class_rows] == label).mean()))
     return float(np.mean(recalls)) if recalls else None
 
-def extract_random_mean_std(datasets, base_path_pattern):
-    """提取随机实验的均值和标准差"""
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_random_results(results_dir, datasets):
+    """Require the recorded ten-seed experiment and verify each result CSV."""
+    manifest_path = results_dir / "experiment_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing random experiment manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    completed = manifest.get("completed_seeds", {})
+    expected_keys = {str(seed) for seed in EXPECTED_SEEDS}
+    if (
+        manifest.get("all_ten_complete") is not True
+        or set(completed) != expected_keys
+        or len(set(completed.values())) != len(EXPECTED_SEEDS)
+    ):
+        raise ValueError(f"Random experiment is not a complete ten-seed run: {manifest_path}")
+
+    result_files = {dataset: [] for dataset in datasets}
+    for seed in EXPECTED_SEEDS:
+        seed_dir = results_dir / f"seed_{seed:02d}"
+        seed_manifest_path = seed_dir / "seed_manifest.json"
+        if not seed_manifest_path.is_file():
+            raise FileNotFoundError(f"Missing seed manifest: {seed_manifest_path}")
+        seed_manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+        if seed_manifest.get("seed") != seed:
+            raise ValueError(f"Unexpected seed in {seed_manifest_path}")
+        for dataset in datasets:
+            csv_path = seed_dir / f"{dataset}_gene_result.csv"
+            if not csv_path.is_file():
+                raise FileNotFoundError(f"Missing random result: {csv_path}")
+            expected_hash = (
+                seed_manifest.get("metrics", {}).get(dataset, {}).get("csv_sha256")
+            )
+            if not expected_hash or _sha256_file(csv_path) != expected_hash:
+                raise ValueError(f"CSV hash does not match seed manifest: {csv_path}")
+            result_files[dataset].append(csv_path)
+    return manifest, result_files
+
+
+def extract_random_mean_std(datasets, result_files):
+    """Calculate per-dataset sample mean and s.d. from seeds 1 through 10."""
     means = []
     stds = []
     all_run_accs = []
     
     for dataset in datasets:
-        pattern = base_path_pattern.format(dataset=dataset)
-        files = sorted(glob.glob(pattern))
-        
         accs = []
-        for file_path in files:
+        for file_path in result_files[dataset]:
             acc = calculate_metrics(file_path, use_top30=True)
-            if acc is not None:
-                accs.append(acc)
+            if acc is None or not np.isfinite(acc):
+                raise ValueError(f"{dataset}: invalid balanced accuracy in {file_path}")
+            accs.append(acc)
         
         if len(accs) < 2:
             raise ValueError(f"{dataset}: need at least two valid random runs; found {len(accs)}")
@@ -259,28 +317,31 @@ def plot_accuracy_comparison(
 
 def main():
     """主函数"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--random-results-dir", type=Path, default=DEFAULT_RANDOM_RESULTS_DIR)
+    parser.add_argument("--weight-results-dir", type=Path, default=DEFAULT_WEIGHT_RESULTS_DIR)
+    parser.add_argument("--output-pdf", type=Path, default=DEFAULT_OUTPUT_PDF)
+    args = parser.parse_args()
+
     # 数据集列表
     datasets = ['hESC', 'hHep', 'mHSC-E', 'mHSC-GM', 'mHSC-L']
-    
-    # 文件路径模板
-    random_pattern_new = "/mnt/10T/yzn/scGRN-Bench/FBplot/fig4/results_multidataset_pseudotime_227_random/{dataset}_gene_result_run*.csv"
-    random_pattern_old = "/mnt/10T/yzn/FoundBench/FBplot/fig4/results_multidataset_pseudotime_227_random/{dataset}_gene_result_run*.csv"
-    sample_new = glob.glob(random_pattern_new.format(dataset=datasets[0]))
-    random_pattern = random_pattern_new if sample_new else random_pattern_old
-    weight_pattern = "/mnt/10T/yzn/benchmark_GRN/pre_scgpt/results_multidataset_pseudotime_227/{dataset}_gene_result.csv"
+    _, result_files = validate_random_results(args.random_results_dir, datasets)
+    weight_pattern = str(args.weight_results_dir / "{dataset}_gene_result.csv")
     
     print("=" * 60)
     print("处理 top30 结果 - 平衡准确率")
     print("=" * 60)
-    print(f"Random pattern: {random_pattern}")
+    print(f"Random results: {args.random_results_dir} (seeds 1-10)")
     print(f"Weight pattern: {weight_pattern}")
     
     # 提取随机结果（均值和标准差）
     print("\n📊 提取随机实验结果...")
-    random_means, random_stds, random_run_accs = extract_random_mean_std(datasets, random_pattern)
+    random_means, random_stds, random_run_accs = extract_random_mean_std(datasets, result_files)
     run_counts = [len(scores) for scores in random_run_accs]
     if len(set(run_counts)) != 1:
         raise ValueError(f"Random run counts differ across datasets: {dict(zip(datasets, run_counts))}")
+    if run_counts != [len(EXPECTED_SEEDS)] * len(datasets):
+        raise ValueError(f"Expected exactly ten random runs per dataset; found {dict(zip(datasets, run_counts))}")
     print(f"Random runs per dataset: n = {run_counts[0]}; error bars: sample s.d. (ddof=1)")
     
     for ds, mean, std in zip(datasets, random_means, random_stds):
@@ -294,21 +355,41 @@ def main():
         print(f"  {ds}: {acc:.4f}")
     
     # 输出文件名
-    output_pdf = "top30_balanced_accuracy_no_mDC.pdf"
+    output_pdf = args.output_pdf
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
     
     # 绘制图表
     plot_accuracy_comparison(datasets, random_means, random_stds, random_run_accs,
                              weight_accs, output_pdf)
+    output_stem = Path(output_pdf).with_suffix("")
+    summary_path = output_stem.with_name(output_stem.name + "_summary.csv")
+    summary_rows = []
+    for index, dataset in enumerate(datasets):
+        row = {
+            "dataset": dataset,
+            "random_mean_balanced_accuracy": random_means[index],
+            "random_sample_sd": random_stds[index],
+            "pretrained_balanced_accuracy": weight_accs[index],
+            "pretrained_minus_random": weight_accs[index] - random_means[index],
+        }
+        row.update({
+            f"seed_{seed:02d}": random_run_accs[index][seed - 1]
+            for seed in EXPECTED_SEEDS
+        })
+        summary_rows.append(row)
+    pd.DataFrame(summary_rows).to_csv(summary_path, index=False, float_format="%.10g")
+    print(f"Summary table saved to: {summary_path}")
     caption = (
         f"Fig. 6a | Balanced accuracy for randomly initialized and pretrained scGPT. "
         f"Random bars show the mean across n = {run_counts[0]} runs of randomly "
         "initialized scGPT per dataset; overlaid points show individual runs and error "
         "bars indicate sample standard deviation (s.d.). Pretrained bars show "
         "values from a single deterministic run (n = 1), without error bars. "
-        "Balanced accuracy was evaluated on the top 30% of genes ranked by "
-        "absolute true change in each dataset."
+        "Balanced accuracy was evaluated on the top 30% of vocabulary-mapped genes "
+        "ranked by absolute true change; near-zero true directions were excluded and "
+        "near-zero predictions counted as incorrect."
     )
-    caption_path = os.path.splitext(output_pdf)[0] + '_caption.txt'
+    caption_path = str(output_stem) + '_caption.txt'
     with open(caption_path, 'w', encoding='utf-8') as handle:
         handle.write(caption + '\n')
     print(f"Figure caption saved to: {caption_path}")
