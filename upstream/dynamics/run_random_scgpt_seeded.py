@@ -64,28 +64,20 @@ def write_json(path, payload):
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def calculate_metrics(file_path, use_top30=True, top_percent=0.3):
-    """Balanced accuracy on top-30% |delta_true| genes (same as weight_balance.py)."""
+def calculate_metrics(file_path, evaluator):
+    """Score a result CSV with the pretrained scGPT evaluator's exact policy."""
     df = pd.read_csv(file_path)
-    required_cols = ["dir_true", "dir_pred", "delta_true"]
+    required_cols = ["in_eval", "delta_true", "delta_pred"]
     if not all(col in df.columns for col in required_cols):
-        return None
-    if use_top30:
-        df = df.copy()
-        df["abs_delta_true"] = df["delta_true"].abs()
-        n_top = int(np.ceil(top_percent * len(df)))
-        df_used = df.nlargest(n_top, "abs_delta_true")
-    else:
-        df_used = df
-    y_true = (df_used["dir_true"] == "Up").astype(int)
-    y_pred = (df_used["dir_pred"] == "Up").astype(int)
-    tp = np.sum((y_true == 1) & (y_pred == 1))
-    tn = np.sum((y_true == 0) & (y_pred == 0))
-    fp = np.sum((y_true == 0) & (y_pred == 1))
-    fn = np.sum((y_true == 1) & (y_pred == 0))
-    sens = tp / (tp + fn) if (tp + fn) else 0.0
-    spec = tn / (tn + fp) if (tn + fp) else 0.0
-    return float(0.5 * (sens + spec))
+        raise ValueError(f"{file_path} is missing evaluator columns: {required_cols}")
+    eval_idx = np.flatnonzero(df["in_eval"].to_numpy(dtype=int) == 1)
+    return float(
+        evaluator.balanced_direction_accuracy(
+            df["delta_pred"].to_numpy(dtype=float),
+            df["delta_true"].to_numpy(dtype=float),
+            eval_idx,
+        )
+    )
 
 
 def main():
@@ -145,7 +137,7 @@ def main():
                 name, evaluator.DATASETS[name], model, vocab, device, stage
             )
             csv_path = stage / f"{name}_gene_result.csv"
-            ba = calculate_metrics(csv_path, use_top30=True)
+            ba = calculate_metrics(csv_path, evaluator)
             if ba is None or not np.isfinite(ba):
                 raise RuntimeError(f"Invalid balanced accuracy for {name}, seed {seed}")
             metrics[name] = {

@@ -9,6 +9,8 @@ Re-run the Fig. 6a random scGPT control with recorded, distinct seeds.
 Adapted from scGRN-Bench/FBplot/fig5/run_random_scgpt_seeded.py.
 Evaluation uses the same iterative settings as pretrained scGPT
 (run_scgpt_gene_results.py): top 30%, 16 iters, EMA α=0.9, five datasets.
+The reported balanced accuracy calls the pretrained evaluator's shared metric
+directly, using its mapped-gene `in_eval` mask and near-zero direction policy.
 
 ## Dependencies
 

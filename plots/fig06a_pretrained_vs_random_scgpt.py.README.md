@@ -6,6 +6,9 @@ File-level notes generated from the current server source by static inspection.
 
 绘制 Random 和 Weight 两个模型在 top30 数据集上的平衡准确率对比柱状图
 
+Metric handling uses `in_eval` when present, excludes near-zero true directions,
+and counts near-zero predictions as incorrect, matching the scGPT evaluator.
+
 ## Dependencies
 
 Imports found in the source (standard library and external modules): `glob`, `matplotlib`, `numpy`, `os`, `pandas`, `warnings`.

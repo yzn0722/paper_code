@@ -26,7 +26,8 @@ def calculate_metrics(file_path, use_top30=True, top_percent=0.3):
 
     Prefer CSV columns written by the fixed dynamics exporter:
       - in_eval=1 selects mapped top-% genes
-      - empty dir_true / dir_pred means near-zero (excluded)
+      - empty dir_true means near-zero truth (excluded)
+      - empty dir_pred means a wrong prediction for either true class
     Falls back to legacy abs(delta_true) top-% for older CSVs.
     """
     df = pd.read_csv(file_path)
@@ -45,29 +46,20 @@ def calculate_metrics(file_path, use_top30=True, top_percent=0.3):
     else:
         df_used = df
 
-    # Drop near-zero / undefined directions (empty string after EPS_DIR fix).
-    df_used = df_used[
-        df_used["dir_true"].astype(str).isin(["Up", "Down"])
-        & df_used["dir_pred"].astype(str).isin(["Up", "Down"])
-    ]
+    # Match run_scgpt_gene_results.balanced_direction_accuracy: omit only
+    # near-zero true directions. Near-zero predictions remain incorrect.
+    df_used = df_used[df_used["dir_true"].astype(str).isin(["Up", "Down"])]
     if len(df_used) == 0:
         return None
-    
-    y_true = (df_used['dir_true'] == 'Up').astype(int)
-    y_pred = (df_used['dir_pred'] == 'Up').astype(int)
 
-    # 计算平衡准确率
-    tp = np.sum((y_true == 1) & (y_pred == 1))
-    tn = np.sum((y_true == 0) & (y_pred == 0))
-    fp = np.sum((y_true == 0) & (y_pred == 1))
-    fn = np.sum((y_true == 1) & (y_pred == 0))
-
-    # 避免除以 0
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-    balanced_acc = (sensitivity + specificity) / 2.0
-    
-    return float(balanced_acc)
+    recalls = []
+    true_labels = df_used["dir_true"].astype(str)
+    pred_labels = df_used["dir_pred"].astype(str)
+    for label in ("Down", "Up"):
+        class_rows = true_labels == label
+        if class_rows.any():
+            recalls.append(float((pred_labels[class_rows] == label).mean()))
+    return float(np.mean(recalls)) if recalls else None
 
 def extract_random_mean_std(datasets, base_path_pattern):
     """提取随机实验的均值和标准差"""
