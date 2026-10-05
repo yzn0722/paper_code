@@ -32,48 +32,73 @@ DEFAULT_WEIGHT_RESULTS_DIR = Path(
     "/mnt/10T/yzn/benchmark_GRN/pre_scgpt/results_multidataset_pseudotime_227"
 )
 DEFAULT_OUTPUT_PDF = Path(__file__).resolve().with_name(
-    "top30_balanced_accuracy_seeded10.pdf"
+    "top30_balanced_accuracy_seeded10_mapped_top30.pdf"
+)
+DEFAULT_VOCAB_PATH = Path(
+    "/mnt/10T/yzn/benchmark_GRN/pre_scgpt/scGPT/scgpt_human/vocab.json"
 )
 EXPECTED_SEEDS = tuple(range(1, 11))
+EPS_DIR = 1e-3  # Keep aligned with upstream/dynamics/run_scgpt_gene_results.py.
 
-def calculate_metrics(file_path, use_top30=True, top_percent=0.3):
-    """计算单个文件的平衡准确率。
+def load_vocab_tokens(vocab_path):
+    """Load the scGPT vocabulary tokens used to identify mapped genes."""
+    payload = json.loads(vocab_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        return {str(token).strip().upper() for token in payload}
+    if isinstance(payload, list):
+        return {str(token).strip().upper() for token in payload}
+    raise ValueError(f"Unsupported vocabulary format: {vocab_path}")
 
-    Prefer CSV columns written by the fixed dynamics exporter:
-      - in_eval=1 selects mapped top-% genes
-      - empty dir_true means near-zero truth (excluded)
-      - empty dir_pred means a wrong prediction for either true class
-    Falls back to legacy abs(delta_true) top-% for older CSVs.
-    """
+
+def calculate_metrics(file_path, dataset, vocab_tokens, use_top30=True, top_percent=0.3):
+    """Calculate BA using mapped top-% genes and the evaluator EPS_DIR policy."""
     df = pd.read_csv(file_path)
-    
-    required_cols = ['dir_true', 'dir_pred', 'delta_true']
+
+    required_cols = ["delta_true", "delta_pred"]
     if not all(col in df.columns for col in required_cols):
-        return None
-    
+        raise ValueError(f"{file_path} is missing required columns: {required_cols}")
+    true_delta = pd.to_numeric(df["delta_true"], errors="raise").to_numpy(dtype=float)
+    pred_delta = pd.to_numeric(df["delta_pred"], errors="raise").to_numpy(dtype=float)
+
     if "in_eval" in df.columns:
-        df_used = df[df["in_eval"].astype(int) == 1].copy()
+        in_eval = pd.to_numeric(df["in_eval"], errors="raise").to_numpy()
+        eval_idx = np.flatnonzero(in_eval == 1)
     elif use_top30:
-        df['abs_delta_true'] = df['delta_true'].abs()
-        n_total = len(df)
-        n_top = int(np.ceil(top_percent * n_total))
-        df_used = df.nlargest(n_top, 'abs_delta_true')
+        if "is_mapped" in df.columns:
+            mapped_values = df["is_mapped"]
+            if mapped_values.dtype == bool:
+                mapped = mapped_values.to_numpy()
+            else:
+                mapped = pd.to_numeric(mapped_values, errors="raise").to_numpy() == 1
+        else:
+            gene_col = "gene_used" if "gene_used" in df.columns else "gene"
+            if gene_col not in df.columns or vocab_tokens is None:
+                raise ValueError(
+                    f"{file_path} lacks in_eval/is_mapped; a gene column and vocab are required"
+                )
+            gene_names = df[gene_col].fillna("").astype(str).str.strip().str.upper()
+            mapped = gene_names.isin(vocab_tokens).to_numpy()
+        mapped_pool = np.flatnonzero(mapped)
+        if mapped_pool.size == 0:
+            raise ValueError(f"{file_path} has no genes mapped to the supplied vocabulary")
+        n_top = max(int(mapped_pool.size * top_percent), 1)
+        order = np.argsort(np.abs(true_delta[mapped_pool]))[::-1]
+        eval_idx = mapped_pool[order[:n_top]]
     else:
-        df_used = df
+        eval_idx = np.arange(len(df))
 
-    # Match run_scgpt_gene_results.balanced_direction_accuracy: omit only
-    # near-zero true directions. Near-zero predictions remain incorrect.
-    df_used = df_used[df_used["dir_true"].astype(str).isin(["Up", "Down"])]
-    if len(df_used) == 0:
+    if eval_idx.size == 0:
         return None
-
+    true_eval = true_delta[eval_idx]
+    pred_eval = pred_delta[eval_idx]
+    true_dir = np.where(true_eval > EPS_DIR, 1, np.where(true_eval < -EPS_DIR, -1, 0))
+    pred_dir = np.where(pred_eval > EPS_DIR, 1, np.where(pred_eval < -EPS_DIR, -1, 0))
+    valid_true = true_dir != 0
     recalls = []
-    true_labels = df_used["dir_true"].astype(str)
-    pred_labels = df_used["dir_pred"].astype(str)
-    for label in ("Down", "Up"):
-        class_rows = true_labels == label
+    for label in (-1, 1):
+        class_rows = valid_true & (true_dir == label)
         if class_rows.any():
-            recalls.append(float((pred_labels[class_rows] == label).mean()))
+            recalls.append(float(np.mean(pred_dir[class_rows] == label)))
     return float(np.mean(recalls)) if recalls else None
 
 def _sha256_file(path):
@@ -100,6 +125,7 @@ def validate_random_results(results_dir, datasets):
         raise ValueError(f"Random experiment is not a complete ten-seed run: {manifest_path}")
 
     result_files = {dataset: [] for dataset in datasets}
+    manifest_scores = {dataset: [] for dataset in datasets}
     for seed in EXPECTED_SEEDS:
         seed_dir = results_dir / f"seed_{seed:02d}"
         seed_manifest_path = seed_dir / "seed_manifest.json"
@@ -118,10 +144,13 @@ def validate_random_results(results_dir, datasets):
             if not expected_hash or _sha256_file(csv_path) != expected_hash:
                 raise ValueError(f"CSV hash does not match seed manifest: {csv_path}")
             result_files[dataset].append(csv_path)
-    return manifest, result_files
+            manifest_scores[dataset].append(
+                seed_manifest.get("metrics", {}).get(dataset, {}).get("balanced_accuracy_top30")
+            )
+    return manifest, result_files, manifest_scores
 
 
-def extract_random_mean_std(datasets, result_files):
+def extract_random_mean_std(datasets, result_files, vocab_tokens):
     """Calculate per-dataset sample mean and s.d. from seeds 1 through 10."""
     means = []
     stds = []
@@ -130,7 +159,7 @@ def extract_random_mean_std(datasets, result_files):
     for dataset in datasets:
         accs = []
         for file_path in result_files[dataset]:
-            acc = calculate_metrics(file_path, use_top30=True)
+            acc = calculate_metrics(file_path, dataset, vocab_tokens, use_top30=True)
             if acc is None or not np.isfinite(acc):
                 raise ValueError(f"{dataset}: invalid balanced accuracy in {file_path}")
             accs.append(acc)
@@ -143,14 +172,14 @@ def extract_random_mean_std(datasets, result_files):
 
     return means, stds, all_run_accs
 
-def extract_weight_accuracies(datasets, base_path_pattern):
+def extract_weight_accuracies(datasets, base_path_pattern, vocab_tokens):
     """提取权重结果的平衡准确率"""
     accuracies = []
     
     for dataset in datasets:
         file_path = base_path_pattern.format(dataset=dataset)
         if os.path.exists(file_path):
-            acc = calculate_metrics(file_path, use_top30=True)
+            acc = calculate_metrics(file_path, dataset, vocab_tokens, use_top30=True)
             accuracies.append(acc if acc is not None else np.nan)
         else:
             accuracies.append(np.nan)
@@ -320,12 +349,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--random-results-dir", type=Path, default=DEFAULT_RANDOM_RESULTS_DIR)
     parser.add_argument("--weight-results-dir", type=Path, default=DEFAULT_WEIGHT_RESULTS_DIR)
+    parser.add_argument("--vocab-path", type=Path, default=DEFAULT_VOCAB_PATH)
     parser.add_argument("--output-pdf", type=Path, default=DEFAULT_OUTPUT_PDF)
     args = parser.parse_args()
 
     # 数据集列表
     datasets = ['hESC', 'hHep', 'mHSC-E', 'mHSC-GM', 'mHSC-L']
-    _, result_files = validate_random_results(args.random_results_dir, datasets)
+    _, result_files, manifest_scores = validate_random_results(args.random_results_dir, datasets)
+    vocab_tokens = load_vocab_tokens(args.vocab_path)
     weight_pattern = str(args.weight_results_dir / "{dataset}_gene_result.csv")
     
     print("=" * 60)
@@ -336,20 +367,34 @@ def main():
     
     # 提取随机结果（均值和标准差）
     print("\n📊 提取随机实验结果...")
-    random_means, random_stds, random_run_accs = extract_random_mean_std(datasets, result_files)
+    random_means, random_stds, random_run_accs = extract_random_mean_std(
+        datasets, result_files, vocab_tokens
+    )
     run_counts = [len(scores) for scores in random_run_accs]
     if len(set(run_counts)) != 1:
         raise ValueError(f"Random run counts differ across datasets: {dict(zip(datasets, run_counts))}")
     if run_counts != [len(EXPECTED_SEEDS)] * len(datasets):
         raise ValueError(f"Expected exactly ten random runs per dataset; found {dict(zip(datasets, run_counts))}")
     print(f"Random runs per dataset: n = {run_counts[0]}; error bars: sample s.d. (ddof=1)")
+    for dataset in datasets:
+        mismatches = [
+            seed for seed, old, new in zip(
+                EXPECTED_SEEDS, manifest_scores[dataset], random_run_accs[datasets.index(dataset)]
+            )
+            if old is None or abs(float(old) - new) > 1e-10
+        ]
+        if mismatches:
+            print(
+                f"[INFO] {dataset}: recomputed seeds {mismatches}; stored manifest BA "
+                "uses a different scoring policy and is not used in this figure."
+            )
     
     for ds, mean, std in zip(datasets, random_means, random_stds):
         print(f"  {ds}: {mean:.4f} ± {std:.4f}")
     
     # 提取权重结果
     print("\n📊 提取权重结果...")
-    weight_accs = extract_weight_accuracies(datasets, weight_pattern)
+    weight_accs = extract_weight_accuracies(datasets, weight_pattern, vocab_tokens)
     
     for ds, acc in zip(datasets, weight_accs):
         print(f"  {ds}: {acc:.4f}")
@@ -373,7 +418,11 @@ def main():
             "pretrained_minus_random": weight_accs[index] - random_means[index],
         }
         row.update({
-            f"seed_{seed:02d}": random_run_accs[index][seed - 1]
+            f"seed_{seed:02d}_ba": random_run_accs[index][seed - 1]
+            for seed in EXPECTED_SEEDS
+        })
+        row.update({
+            f"manifest_seed_{seed:02d}_ba": manifest_scores[dataset][seed - 1]
             for seed in EXPECTED_SEEDS
         })
         summary_rows.append(row)
@@ -385,9 +434,9 @@ def main():
         "initialized scGPT per dataset; overlaid points show individual runs and error "
         "bars indicate sample standard deviation (s.d.). Pretrained bars show "
         "values from a single deterministic run (n = 1), without error bars. "
-        "Balanced accuracy was evaluated on the top 30% of vocabulary-mapped genes "
-        "ranked by absolute true change; near-zero true directions were excluded and "
-        "near-zero predictions counted as incorrect."
+        "Balanced accuracy was recalculated on the top 30% of vocabulary-mapped genes "
+        "ranked by absolute true change using the evaluator's EPS_DIR=0.001 policy; "
+        "near-zero true directions were excluded and near-zero predictions counted as incorrect."
     )
     caption_path = str(output_stem) + '_caption.txt'
     with open(caption_path, 'w', encoding='utf-8') as handle:
