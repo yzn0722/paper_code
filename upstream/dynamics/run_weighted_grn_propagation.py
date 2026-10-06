@@ -12,6 +12,7 @@ No model is loaded. The script only reads saved mean trajectories and a GRN TSV.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -24,6 +25,14 @@ from scipy import stats
 
 
 EPS = 1e-12
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def parse_args():
@@ -293,6 +302,21 @@ def run(args):
     ) if len(reverse_pairs) >= 3 else None
     report = {
         "preflight": pre,
+        "input_provenance": {
+            "trajectory_sha256": {
+                group: file_sha256(Path(args.trajectory_dir) / f"{group}_mean_trajectory.npy")
+                for group in states
+            },
+            "expression_sha256": file_sha256(args.expression_csv),
+            "vocab_sha256": file_sha256(args.vocab_json) if args.vocab_json else None,
+            "grn_sha256": file_sha256(args.grn_tsv),
+            "script_sha256": file_sha256(__file__),
+        },
+        "protocol": {
+            "seed": args.seed,
+            "transient_lags": args.transient_iters,
+            "primary_orientation": "query_to_key_primary",
+        },
         "network_name": args.network_name,
         "grn": str(args.grn_tsv),
         "weight_policy": "positive weights only; incoming normalization",

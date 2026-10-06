@@ -6,13 +6,15 @@ Observed points are the median Spearman rho over the first eight refinement lags
 eight lag-wise Spearman values. Grey shading remains the pooled rewired-null
 5th--95th percentile (3 representations x 200 rewirings = 600).
 
-Reads archived propagation JSON under scGRN-Bench/FBplot/fig6/raw_rewiring/ and
-writes figures + source CSV under paper-code/outputs/fig06c/.
+Reads query_to_key_primary results and their rewired draws from the same three
+propagation JSON files. Legacy key-to-query results are rejected. Run
+upstream/dynamics/run_fig06c_query_to_key.py to generate the matching inputs.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -29,19 +31,16 @@ SERIES = (
     ("cos_hid", r"cos$_{hid}$", "#AC99D2"),
 )
 
-DEFAULT_JSON_DIR = Path(
-    "/mnt/10T/yzn/scGRN-Bench/FBplot/fig6/raw_rewiring"
-)
-DEFAULT_PLOT_DATA = Path(
-    "/mnt/10T/yzn/scGRN-Bench/FBplot/fig6/plot_data.csv"
-)
-DEFAULT_OUTDIR = Path(__file__).resolve().parents[1] / "outputs" / "fig06c"
+ORIENTATION = "query_to_key_primary"
+N_NULL = 200
+N_LAGS = 8
+DEFAULT_OUTDIR = Path(__file__).resolve().parents[1] / "outputs" / "fig06c" / "query_to_key"
+DEFAULT_JSON_DIR = DEFAULT_OUTDIR / "raw"
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--json-dir", type=Path, default=DEFAULT_JSON_DIR)
-    p.add_argument("--plot-data", type=Path, default=DEFAULT_PLOT_DATA)
     p.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
     p.add_argument(
         "--error",
@@ -52,17 +51,44 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def load_observed_with_lag_errors(json_dir: Path, error: str) -> pd.DataFrame:
-    rows = []
+def load_reports(json_dir: Path) -> dict:
+    reports = {}
     for key, _, _ in SERIES:
         path = json_dir / f"weighted_grn_propagation_{key}.json"
-        if not path.is_file():
-            raise FileNotFoundError(path)
         report = json.loads(path.read_text(encoding="utf-8"))
+        if report["preflight"]["n_null"] != N_NULL:
+            raise ValueError(f"{path}: expected {N_NULL} null networks per representation")
         for density in DENSITIES:
-            block = report["analyses"][str(density)]["key_to_query_primary"]["early"]
-            lags = block["per_lag"][:8]
-            if len(lags) != 8:
+            analyses = report["analyses"][str(density)]
+            if ORIENTATION not in analyses:
+                raise ValueError(
+                    f"{path}/{density}: missing {ORIENTATION}; regenerate query-to-key "
+                    "results. Legacy key_to_query_primary is not interchangeable."
+                )
+        reports[key] = report
+    shapes = {tuple(r["preflight"]["trajectory_shape"]) for r in reports.values()}
+    if len(shapes) != 1:
+        raise ValueError("The three representations use different trajectory shapes")
+    # Newly generated reports also identify the shared trajectory and gene order.
+    provenance = [r.get("input_provenance") for r in reports.values()]
+    if any(p is not None for p in provenance):
+        if any(p is None for p in provenance):
+            raise ValueError("Do not mix reports with and without input provenance")
+        for field in ("trajectory_sha256", "expression_sha256", "vocab_sha256"):
+            if len({json.dumps(p[field], sort_keys=True) for p in provenance}) != 1:
+                raise ValueError(f"The three representations have different {field}")
+    return reports
+
+
+def load_observed_with_lag_errors(json_dir: Path, error: str, reports=None) -> pd.DataFrame:
+    reports = load_reports(json_dir) if reports is None else reports
+    rows = []
+    for key, _, _ in SERIES:
+        report = reports[key]
+        for density in DENSITIES:
+            block = report["analyses"][str(density)][ORIENTATION]["early"]
+            lags = block["per_lag"][:N_LAGS]
+            if len(lags) != N_LAGS or block["windows"]["transient"]["observed"]["n_lags"] != N_LAGS:
                 raise ValueError(f"{key}/{density}: expected 8 transient lags, got {len(lags)}")
             spearman = np.asarray([row["spearman"] for row in lags], dtype=float)
             if not np.isfinite(spearman).all():
@@ -97,39 +123,51 @@ def load_observed_with_lag_errors(json_dir: Path, error: str) -> pd.DataFrame:
                     "yerr_hi": yerr_hi,
                     "n_lags": 8,
                     "error_kind": error,
+                    "orientation": ORIENTATION,
+                    "group": "early",
+                    "representation_null_mean": block["windows"]["transient"]["rewired"]["spearman"]["null_mean"],
+                    "representation_empirical_p": block["windows"]["transient"]["rewired"]["spearman"]["empirical_p_greater"],
                 }
             )
     return pd.DataFrame(rows)
 
 
-def load_pooled_null(plot_data: Path) -> pd.DataFrame:
-    frame = pd.read_csv(plot_data)
-    need = {
-        "top_ranked_edges",
-        "rewired_null_mean",
-        "rewired_null_q05",
-        "rewired_null_q95",
-        "rewired_null_n_pooled",
-    }
-    if not need.issubset(frame.columns):
-        raise ValueError(f"plot_data.csv missing columns: {sorted(need - set(frame.columns))}")
-    frame = frame.set_index("top_ranked_edges").loc[DENSITIES].reset_index()
-    if not (frame.rewired_null_n_pooled == 600).all():
-        raise ValueError("Expected pooled null n=600 at each density")
-    return frame
+def load_pooled_null(json_dir: Path, reports=None) -> pd.DataFrame:
+    """Pool 3 x 200 draws from the same orientation/window as the observed points."""
+    reports = load_reports(json_dir) if reports is None else reports
+    rows = []
+    for density in DENSITIES:
+        draws = []
+        for key, _, _ in SERIES:
+            block = reports[key]["analyses"][str(density)][ORIENTATION]["early"]
+            values = np.asarray(block["windows"]["transient"]["rewired"]["spearman"]["null_values"], float)
+            if values.shape != (N_NULL,) or not np.isfinite(values).all():
+                raise ValueError(f"{key}/{density}: expected {N_NULL} finite rewired draws")
+            draws.append(values)
+        pooled = np.concatenate(draws)
+        rows.append({
+            "top_ranked_edges": density,
+            "rewired_null_mean": float(pooled.mean()),
+            "rewired_null_q05": float(np.quantile(pooled, 0.05)),
+            "rewired_null_q95": float(np.quantile(pooled, 0.95)),
+            "rewired_null_n_pooled": len(pooled),
+        })
+    return pd.DataFrame(rows)
 
 
 def plot_figure(observed: pd.DataFrame, null: pd.DataFrame, outdir: Path, error: str) -> Path:
     plt.rcParams.update(
         {
-            "font.family": "DejaVu Sans",
+            "font.family": "sans-serif",
+            "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica"],
             "font.size": 16,
             "axes.linewidth": 0.8,
             "svg.fonttype": "none",
-            "pdf.fonttype": 3,
+            "pdf.fonttype": 42,
         }
     )
-    fig, ax = plt.subplots(figsize=(510.503 / 72.0, 335.753 / 72.0))
+    # Retain the original panel dimensions (180.09 x 118.45 mm).
+    fig, ax = plt.subplots(figsize=(7.0903194444, 4.6632361111))
     x = np.arange(len(DENSITIES))
 
     q05 = null.rewired_null_q05.to_numpy(float)
@@ -243,6 +281,13 @@ def plot_figure(observed: pd.DataFrame, null: pd.DataFrame, outdir: Path, error:
     fig.subplots_adjust(left=0.17, right=0.985, bottom=0.26, top=0.978)
     outdir.mkdir(parents=True, exist_ok=True)
     stem = outdir / f"grn_representation_combined_to30k_with_pooled_null_err_{error}"
+    fig.canvas.draw()
+    layout = {
+        "alignment": "NOT APPLICABLE: one plot panel",
+        "figure_size_pt": (fig.get_size_inches() * 72).tolist(),
+        "plot_area_bounds_fraction": list(ax.get_position().bounds),
+    }
+    (outdir / "fig06c_layout.json").write_text(json.dumps(layout, indent=2) + "\n", encoding="utf-8")
     fig.savefig(stem.with_suffix(".pdf"), dpi=300, facecolor="white")
     fig.savefig(stem.with_suffix(".svg"))
     fig.savefig(stem.with_suffix(".png"), dpi=600, facecolor="white")
@@ -252,8 +297,9 @@ def plot_figure(observed: pd.DataFrame, null: pd.DataFrame, outdir: Path, error:
 
 def main() -> None:
     args = parse_args()
-    observed = load_observed_with_lag_errors(args.json_dir, args.error)
-    null = load_pooled_null(args.plot_data)
+    reports = load_reports(args.json_dir)
+    observed = load_observed_with_lag_errors(args.json_dir, args.error, reports)
+    null = load_pooled_null(args.json_dir, reports)
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     source = observed.merge(
@@ -271,6 +317,22 @@ def main() -> None:
     )
     source_path = args.outdir / "fig06c_density_with_lag_errorbars_source_data.csv"
     source.to_csv(source_path, index=False)
+    null.to_csv(args.outdir / "fig06c_query_to_key_pooled_null.csv", index=False)
+    provenance = {
+        "orientation": ORIENTATION,
+        "group": "early",
+        "transient_lags": N_LAGS,
+        "nulls_per_representation": N_NULL,
+        "observed_error_kind": args.error,
+        "source_json_sha256": {
+            key: hashlib.sha256((args.json_dir / f"weighted_grn_propagation_{key}.json").read_bytes()).hexdigest()
+            for key, _, _ in SERIES
+        },
+        "plot_script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+    (args.outdir / "fig06c_plot_manifest.json").write_text(
+        json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
+    )
 
     stem = plot_figure(observed, null, args.outdir, args.error)
     print(f"Wrote {source_path}")
