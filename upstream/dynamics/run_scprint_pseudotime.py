@@ -44,8 +44,13 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import pandas as pd
 import torch
-import scanpy as sc
-from anndata import AnnData
+try:
+    from .direction_metrics import (EPS_DIR, balanced_direction_accuracy,
+                                    direction_signs, metric_metadata, save_accuracy_curves)
+except ImportError:  # Direct script execution.
+    from direction_metrics import (EPS_DIR, balanced_direction_accuracy,
+                                   direction_signs, metric_metadata, save_accuracy_curves)
+
 from scipy.sparse import issparse
 
 # ---------------------------------------------------------------------------
@@ -108,26 +113,14 @@ def direction_accuracy_top_genes(
     pred_delta: np.ndarray,
     true_delta: np.ndarray,
     top_idx: np.ndarray,
-    eps: float = 0.0,
+    eps: float = EPS_DIR,
 ) -> Tuple[float, float]:
+    """Return balanced direction accuracy and inverted-truth BA (legacy API name).
+
+    Near-zero truth is excluded; near-zero prediction is incorrect. Even when
+    eps=0, exact zero is undefined and is never assigned to Down.
     """
-    pred_delta: 预测相对 early 基线的变化（pred_end − early_mean）；
-    true_delta: late_mean − early_mean；在 top_idx 上与 run_unified 一致。
-    """
-    td = true_delta[top_idx]
-    pd = pred_delta[top_idx]
-    if eps > 0.0:
-        m = np.abs(td) > eps
-        if not np.any(m):
-            return float("nan"), float("nan")
-        td = td[m]
-        pd = pd[m]
-    # 与 *_gene_result.csv 一致：delta>0 为 Up，否则为 Down（delta==0 也视为 Down）
-    true_dir = np.where(td > 0, 1, -1)
-    pred_dir = np.where(pd > 0, 1, -1)
-    acc = float((pred_dir == true_dir).mean())
-    inv = float((pred_dir == (-true_dir)).mean())
-    return acc, inv
+    return balanced_direction_accuracy(pred_delta, true_delta, top_idx, eps)
 
 
 def _pca_2d(X: np.ndarray) -> np.ndarray:
@@ -541,6 +534,9 @@ def run_one_dataset(
     device: torch.device,
     args: argparse.Namespace,
 ) -> Tuple[List[float], dict, dict]:
+    import scanpy as sc
+    from anndata import AnnData
+
     expr_raw = pd.read_csv(cfg["expr_csv"], index_col=0)
     pt_df = read_pt_file(cfg["pt_csv"])
     genes_original = expr_raw.index.astype(str).tolist()
@@ -691,7 +687,7 @@ def run_one_dataset(
             pred_delta,
             true_delta,
             top_local,
-            eps=float(getattr(args, "acc_eps", 0.0)),
+            eps=float(getattr(args, "acc_eps", EPS_DIR)),
         )
         acc_curve.append(acc_now)
         acc_inv.append(inv_now)
@@ -699,11 +695,12 @@ def run_one_dataset(
             pred_pos = float((pred_delta > 0).mean())
             true_pos = float((true_delta > 0).mean())
             print(
-                f"    Iter {it+1:>2}/{args.gen_iters} | acc={acc_curve[-1]:.2%} | "
+                f"    Iter {it+1:>2}/{args.gen_iters} | BA={acc_curve[-1]:.2%} | "
                 f"inv={acc_inv[-1]:.2%} | pred_pos={pred_pos:.2%} | true_pos={true_pos:.2%}"
             )
 
     diagnostics = {
+        **metric_metadata(float(args.acc_eps)),
         "dataset": name,
         "model": "scprint",
         "n_genes_total": len(panel_ids),
@@ -775,8 +772,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--acc-eps",
         type=float,
-        default=0.0,
-        help="方向准确率：|true_delta|>eps 才计分（0 与 unified 默认一致）",
+        default=EPS_DIR,
+        help="Balanced accuracy：默认 eps=1e-3；近零真实变化排除，近零预测计错；eps=0 时精确零仍不属于 Down。",
     )
     p.add_argument("--save-trajectory-plot", action="store_true", default=False)
     p.add_argument("--trajectory-embed", choices=["pca", "umap"], default="umap")
@@ -858,11 +855,13 @@ def main() -> None:
                     "gene": art["genes"],
                     "true_delta": art["true_delta"],
                     "pred_delta": art["pred_delta_by_iter"][-1],
-                    "true_sign": np.sign(art["true_delta"]),
-                    "pred_sign": np.sign(art["pred_delta_by_iter"][-1]),
+                    "true_sign": direction_signs(art["true_delta"], args.acc_eps),
+                    "pred_sign": direction_signs(art["pred_delta_by_iter"][-1], args.acc_eps),
                 }
             ).assign(
-                correct_sign=lambda d: d["true_sign"] == d["pred_sign"],
+                correct_sign=lambda d: (d["true_sign"] != 0) & (d["true_sign"] == d["pred_sign"]),
+                is_mapped=True,
+                eligible_direction=lambda d: d["true_sign"] != 0,
                 in_top_eval=[i in set(art["top_idx"].tolist()) for i in range(len(art["genes"]))],
             ).to_csv(ds_dir / "per_gene_final_changes.csv", index=False)
 
@@ -876,13 +875,12 @@ def main() -> None:
                 args.seed,
             )
 
-            print(f"  Final accuracy: {acc[-1]:.2%} | inv-truth: {diag.get('final_acc_inv_truth', 0):.2%}")
+            print(f"  Final balanced accuracy: {acc[-1]:.2%} | inverted-truth BA: {diag.get('final_acc_inv_truth', 0):.2%}")
         except Exception as e:
             errors[name] = str(e)
             print(f"  [ERROR] {e}")
 
-    with open(out_root / "accuracy_curves.json", "w") as f:
-        json.dump(all_curves, f, indent=2)
+    save_accuracy_curves(out_root, all_curves, float(args.acc_eps))
     with open(out_root / "diagnostics.json", "w") as f:
         json.dump(all_diag, f, indent=2)
     with open(out_root / "errors.json", "w") as f:
@@ -891,7 +889,7 @@ def main() -> None:
     print("\n" + "=" * 70)
     print(f"SUMMARY | scPRINT | outdir={out_root}")
     for name, acc in all_curves.items():
-        print(f"{name:<12} | Accuracy: {acc[-1]:.2%}")
+        print(f"{name:<12} | Balanced accuracy: {acc[-1]:.2%}")
     if errors:
         print("FAILED:", errors)
 

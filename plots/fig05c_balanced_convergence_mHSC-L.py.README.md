@@ -39,3 +39,18 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [fig05c_balanced_convergence_mHSC-L.py](fig05c_balanced_convergence_mHSC-L.py)
+
+
+## Metric input compatibility (2026-10-07)
+
+The displayed curves use shared balanced Up/Down recall with `EPS_DIR=1e-3` by
+default: near-zero truth is excluded and near-zero prediction is incorrect.
+When a runner output directory contains `metric_metadata.json` with metric
+`balanced_accuracy` and version 1, validate the saved arrays against that
+root's `balanced_accuracy_curves.json` using its recorded threshold. Otherwise,
+validate the existing ordinary-accuracy reference using its historical zero-as-
+Down convention only for provenance, then calculate the displayed BA using the
+new policy. Legacy validation is explicitly logged; it is not a plotted metric.
+Thus rerun BA output is no longer rejected for disagreeing with an old ordinary-
+accuracy JSON. Unsupported metric metadata and inconsistent reference arrays
+raise errors. Updating this script does not replace previously exported figures.

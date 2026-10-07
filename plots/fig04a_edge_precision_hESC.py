@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-from itertools import product, permutations
+from itertools import product
 from datetime import datetime
 from matplotlib.ticker import FormatStrFormatter
 
@@ -20,6 +20,24 @@ plt.rcParams.update({
 })
 
 # -------------------------- 工具函数：单个方法的精度计算 --------------------------
+def reference_edges_and_candidates(true_file, TFEdges=True):
+    """Use one cleaned reference and candidate universe for curves and chance precision."""
+    reference = pd.read_csv(true_file, usecols=['Gene1', 'Gene2'])
+    reference = reference.dropna().copy()
+    for column in ('Gene1', 'Gene2'):
+        reference[column] = reference[column].astype(str).str.strip()
+    reference = reference[(reference.Gene1 != '') & (reference.Gene2 != '')]
+    reference = reference[reference.Gene1 != reference.Gene2].drop_duplicates()
+    if reference.empty:
+        raise ValueError("Empty true edges file after removing self-loops and duplicates.")
+    genes = set(reference.Gene1) | set(reference.Gene2)
+    sources = set(reference.Gene1) if TFEdges else genes
+    candidates = {(source, target) for source, target in product(sources, genes)
+                  if source != target}
+    reference['EdgeStr'] = reference.Gene1 + '|' + reference.Gene2
+    return set(reference.EdgeStr), candidates
+
+
 def calculate_method_precision(
     pred_file, 
     true_file, 
@@ -35,24 +53,8 @@ def calculate_method_precision(
 
     try:
         # 1. 预处理真实边
-        trueEdgesDF = pd.read_csv(true_file, sep=',', header=0, index_col=None)
-        trueEdgesDF = trueEdgesDF.loc[(trueEdgesDF['Gene1'] != trueEdgesDF['Gene2'])]
-        trueEdgesDF.drop_duplicates(keep='first', inplace=True)
-        if trueEdgesDF.empty:
-            raise ValueError("Empty true edges file.")
-        
-        # TFEdges筛选
-        if TFEdges:
-            uniqueNodes = np.unique(trueEdgesDF.loc[:, ['Gene1','Gene2']])
-            possibleEdges_TF = set(product(set(trueEdgesDF.Gene1), set(uniqueNodes)))
-            possibleEdges_noSelf = set(permutations(uniqueNodes, r=2))
-            valid_edges_set = possibleEdges_TF.intersection(possibleEdges_noSelf)
-            valid_edges_str = {'|'.join(edge) for edge in valid_edges_set}
-            trueEdgesDF['EdgeStr'] = trueEdgesDF['Gene1'] + "|" + trueEdgesDF['Gene2']
-            trueEdgesDF = trueEdgesDF[trueEdgesDF['EdgeStr'].isin(valid_edges_str)]
-        else:
-            trueEdgesDF['EdgeStr'] = trueEdgesDF['Gene1'] + "|" + trueEdgesDF['Gene2']
-        true_edges_set = set(trueEdgesDF['EdgeStr'].values)
+        true_edges_set, valid_edges_set = reference_edges_and_candidates(true_file, TFEdges)
+        valid_edges_str = {'|'.join(edge) for edge in valid_edges_set}
         true_edges_count = len(true_edges_set)
 
         # 2. 预处理预测边
@@ -69,11 +71,11 @@ def calculate_method_precision(
         basic_filtered_edges = len(predDF)
         
         # 步骤3：TFEdges节点过滤
-        if TFEdges:
-            predDF['EdgeStr'] = predDF['Gene1'] + "|" + predDF['Gene2']
-            predDF = predDF[predDF['EdgeStr'].isin(valid_edges_str)]
-        else:
-            predDF['EdgeStr'] = predDF['Gene1'] + "|" + predDF['Gene2']
+        for column in ('Gene1', 'Gene2'):
+            predDF[column] = predDF[column].astype(str).str.strip()
+        predDF['EdgeStr'] = predDF['Gene1'] + "|" + predDF['Gene2']
+        predDF = predDF[predDF['EdgeStr'].isin(valid_edges_str)].copy()
+        predDF = predDF.drop_duplicates(subset=['Gene1', 'Gene2'], keep='first')
         
         # 筛选后的总预测边数（未卡排名）
         filtered_pred_edges_count = len(predDF)
@@ -156,16 +158,17 @@ def plot_three_methods_grn_curve(
         print("❌ No valid method data to plot.")
         return
 
+    # Chance precision uses exactly the same candidate set as the curves.
+    possible_edges_count = len(valid_edges_set)
+    random_precision = true_edges_count / possible_edges_count if possible_edges_count > 0 else 0
+
     # 2. 合并数据并保存
     merged_data = pd.concat(all_methods_data, ignore_index=True)
+    merged_data['CandidateEdgesTotal'] = possible_edges_count
+    merged_data['RandomPrecision'] = random_precision
     if save_data_path:
         merged_data.to_csv(save_data_path, index=False, encoding='utf-8')
         print(f"\n✅ Three-method data saved to: {save_data_path}")
-
-    # 3. 随机基准
-    unique_nodes = np.unique(pd.read_csv(true_file, sep=',')[['Gene1', 'Gene2']])
-    possible_edges_count = len(set(permutations(unique_nodes, r=2)))
-    random_precision = true_edges_count / possible_edges_count if possible_edges_count > 0 else 0
 
     # 4. 绘图（publication-friendly: consistent palette + clean defaults）
     plt.figure(figsize=figsize)

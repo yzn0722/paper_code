@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Plot Fig. 6c: hESC GRN propagation vs edge density, with per-point error bars.
+"""Plot Fig. 6c: hESC GRN propagation vs edge density.
 
 Observed points are the median Spearman rho over the first eight refinement lags
-(same definition as Methods). Error bars show the sample s.d. (ddof=1) of those
-eight lag-wise Spearman values. Grey shading remains the pooled rewired-null
+(same definition as Methods). By default no vertical error bars are shown:
+the eight lags belong to one trajectory and are not independent replicates.
+Their descriptive spread is retained in source data. Grey shading shows the pooled rewired-null
 5th--95th percentile (3 representations x 200 rewirings = 600).
 
 Reads query_to_key_primary results and their rewired draws from the same three
@@ -44,9 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
     p.add_argument(
         "--error",
-        choices=("sd", "sem", "iqr"),
-        default="sd",
-        help="Error bars on observed points: lag sample s.d. (default), SEM, or IQR.",
+        choices=("none", "sd", "sem", "iqr"),
+        default="none",
+        help="Default: no observed error bars. Legacy descriptive lag spread: SD, SEM, or IQR.",
     )
     return p.parse_args()
 
@@ -103,7 +104,9 @@ def load_observed_with_lag_errors(json_dir: Path, error: str, reports=None) -> p
             sem = std / np.sqrt(len(spearman))
             q25 = float(np.percentile(spearman, 25))
             q75 = float(np.percentile(spearman, 75))
-            if error == "sd":
+            if error == "none":
+                yerr_lo = yerr_hi = 0.0
+            elif error == "sd":
                 yerr_lo = yerr_hi = std
             elif error == "sem":
                 yerr_lo = yerr_hi = sem
@@ -184,17 +187,13 @@ def plot_figure(observed: pd.DataFrame, null: pd.DataFrame, outdir: Path, error:
         label="Rewired null 5th–95th percentile",
         zorder=1,
     )
-    ax.errorbar(
+    ax.plot(
         x,
         null_mean,
-        yerr=np.vstack([null_mean - q05, q95 - null_mean]),
-        fmt="--o",
+        "--o",
         color="#777777",
         linewidth=2.4,
         markersize=8,
-        capsize=3.5,
-        capthick=1.2,
-        elinewidth=1.2,
         label="Rewired null mean",
         zorder=2,
     )
@@ -202,22 +201,20 @@ def plot_figure(observed: pd.DataFrame, null: pd.DataFrame, outdir: Path, error:
     for key, label, color in SERIES:
         sub = observed.loc[observed.representation == key].set_index("density").loc[DENSITIES]
         y = sub.transient_spearman.to_numpy(float)
-        yerr = np.vstack([sub.yerr_lo.to_numpy(float), sub.yerr_hi.to_numpy(float)])
-        ax.errorbar(
-            x,
-            y,
-            yerr=yerr,
-            fmt="-o",
+        style = dict(
             color=color,
             linewidth=2.4,
             markersize=8,
             alpha=0.90,
-            capsize=3.5,
-            capthick=1.2,
-            elinewidth=1.2,
             label=label,
             zorder=3,
         )
+        if error == "none":
+            ax.plot(x, y, "-o", **style)
+        else:
+            yerr = np.vstack([sub.yerr_lo.to_numpy(float), sub.yerr_hi.to_numpy(float)])
+            ax.errorbar(x, y, yerr=yerr, fmt="-o", capsize=3.5,
+                        capthick=1.2, elinewidth=1.2, **style)
 
     ax.axhline(0, color="#AAAAAA", linewidth=0.9, zorder=0)
     ax.set_xticks(x, XLABELS)
@@ -280,10 +277,15 @@ def plot_figure(observed: pd.DataFrame, null: pd.DataFrame, outdir: Path, error:
 
     fig.subplots_adjust(left=0.17, right=0.985, bottom=0.26, top=0.978)
     outdir.mkdir(parents=True, exist_ok=True)
-    stem = outdir / f"grn_representation_combined_to30k_with_pooled_null_err_{error}"
+    suffix = "no_errorbars" if error == "none" else f"err_{error}"
+    stem = outdir / f"grn_representation_combined_to30k_with_pooled_null_{suffix}"
     fig.canvas.draw()
     layout = {
         "alignment": "NOT APPLICABLE: one plot panel",
+        "observed_error_kind": error,
+        "vertical_errorbar_container_count": sum(
+            container.__class__.__name__ == "ErrorbarContainer" for container in ax.containers
+        ),
         "figure_size_pt": (fig.get_size_inches() * 72).tolist(),
         "plot_area_bounds_fraction": list(ax.get_position().bounds),
     }
@@ -315,7 +317,7 @@ def main() -> None:
         on="density",
         how="left",
     )
-    source_path = args.outdir / "fig06c_density_with_lag_errorbars_source_data.csv"
+    source_path = args.outdir / "fig06c_density_source_data.csv"
     source.to_csv(source_path, index=False)
     null.to_csv(args.outdir / "fig06c_query_to_key_pooled_null.csv", index=False)
     provenance = {
@@ -324,6 +326,8 @@ def main() -> None:
         "transient_lags": N_LAGS,
         "nulls_per_representation": N_NULL,
         "observed_error_kind": args.error,
+        "null_display": "pooled mean line and 5th-95th percentile shading; no vertical error bars",
+        "observed_error_rationale": "Eight dependent lags of one trajectory, not independent experimental replicates",
         "source_json_sha256": {
             key: hashlib.sha256((args.json_dir / f"weighted_grn_propagation_{key}.json").read_bytes()).hexdigest()
             for key, _, _ in SERIES

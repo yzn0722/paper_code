@@ -5,12 +5,12 @@ repo_root="/mnt/10T/yzn/scGRN-Bench"
 benchmark_root="/mnt/10T/yzn/benchmark_GRN"
 python_bin="/mnt/10T/yzn/anconda3/envs/singlecell/bin/python"
 model_root="$benchmark_root/pre_scgpt/scGPT"
-trajectory_root="$repo_root/outputs/dynamic_grn_cross_dataset"
-result_root="$repo_root/outputs/grn_density_cross_dataset"
-datasets=(hHep mDC mHSC-E mHSC-GM mHSC-L)
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+trajectory_root="$repo_root/outputs/dynamic_grn_cross_dataset_binned_ema09"
+result_root="$repo_root/outputs/grn_density_cross_dataset_binned_ema09"
+datasets=(hESC hHep mDC mHSC-E mHSC-GM mHSC-L)
 
 mkdir -p "$trajectory_root/logs" "$result_root"
-cd "$repo_root/FBplot/fig4"
 
 for dataset in "${datasets[@]}"; do
     result="$trajectory_root/$dataset/early_mean_trajectory.npy"
@@ -19,7 +19,7 @@ for dataset in "${datasets[@]}"; do
         echo "Skipping completed trajectory: $dataset"
         continue
     fi
-    "$python_bin" run_dynamic_grn_validation.py \
+    "$python_bin" "$script_dir/run_dynamic_grn_validation.py" \
         --dataset "$dataset" \
         --outdir "$trajectory_root" \
         --expr-root "$benchmark_root/input_process" \
@@ -29,6 +29,7 @@ for dataset in "${datasets[@]}"; do
         --device cuda \
         --execute \
         --gen-iters 9 \
+        --ema-alpha 0.9 \
         --max-cells 16 \
         --batch-size 4 \
         --n-rewired 1 \
@@ -39,7 +40,7 @@ for dataset in "${datasets[@]}"; do
         --seed 0 2>&1 | tee "$log"
 done
 
-"$python_bin" scripts/run_cross_dataset_grn_density.py \
+"$python_bin" "$script_dir/run_cross_dataset_grn_density.py" \
     --benchmark-root "$benchmark_root" \
     --trajectory-root "$trajectory_root" \
     --outdir "$result_root"

@@ -53,3 +53,16 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [run_scfoundation_balanced.py](run_scfoundation_balanced.py)
+
+## Finite pseudotime validation
+
+Keep the sibling `pseudotime_utils.py` alongside this evaluator. Before input
+alignment or inference, nonnumeric, NaN and infinite pseudotime values are removed
+together with the corresponding expression columns. Remaining cells retain
+expression order and the original inclusive bottom/top 20% quantile split.
+Invalid schemas, duplicate/missing time-file cell IDs, no shared/valid cells and
+empty/overlapping early/late groups raise `ValueError` rather than writing invalid
+means or silently skipping an invalid split. Counts are printed and saved under
+`pseudotime_filter` in diagnostics and the per-dataset `meta.json`; total cell
+counts refer to retained valid shared cells. Existing results require rerunning
+to reflect the filtering.

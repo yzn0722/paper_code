@@ -178,6 +178,8 @@ MODEL_CFG = {
 # Import scFoundation select_model
 # =========================================================
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pseudotime_utils import load_aligned_pseudotime, split_pseudotime_quantiles
 
 if SCFOUNDATION_ROOT not in sys.path:
     sys.path.insert(0, SCFOUNDATION_ROOT)
@@ -633,12 +635,9 @@ def run_one_dataset(name: str, cfg: dict, model, config, gene2idx_model, out_roo
     genes_original = expr.index.astype(str).tolist()
 
     # ----- load pseudotime -----
-    pt_df = pd.read_csv(cfg["pt_csv"])
-    pt_df = pt_df.rename(columns={pt_df.columns[0]: "cell", pt_df.columns[1]: "pt"}).set_index("cell")
-
-    common = expr.columns.intersection(pt_df.index)
-    expr = expr[common]
-    pt = pt_df.loc[common, "pt"].to_numpy()
+    expr, pt, pt_stats = load_aligned_pseudotime(expr, cfg["pt_csv"])
+    early, late, lo, hi = split_pseudotime_quantiles(pt, PT_QUANTILE)
+    print(f"  [INFO] Dropped invalid matched pseudotime cells: {pt_stats['invalid_matched_pseudotime_cells']}")
 
     # ----- gene name normalize -----
     species = cfg.get("species", "human")
@@ -659,14 +658,8 @@ def run_one_dataset(name: str, cfg: dict, model, config, gene2idx_model, out_roo
     X_raw = X_proc.copy()  # for nonzero detection
 
     # ----- early/late by pseudotime quantiles -----
-    lo, hi = np.quantile(pt, [PT_QUANTILE, 1 - PT_QUANTILE])
-    early = pt <= lo
-    late = pt >= hi
     print(f"  [INFO] pt quantiles: lo={lo:.3f} hi={hi:.3f}")
     print(f"  [INFO] Early cells: {int(early.sum())}  Late cells: {int(late.sum())}")
-    if early.sum() == 0 or late.sum() == 0:
-        print("  [ERROR] Early or Late split empty. Skip.")
-        return None, None
 
     # ----- align into model gene space -----
     G_model = int(config["seq_len"])
@@ -882,6 +875,7 @@ def run_one_dataset(name: str, cfg: dict, model, config, gene2idx_model, out_roo
         "gene_index_tsv": GENE_INDEX_TSV,
         "G_model": int(config["seq_len"]),
         "n_cells_total": int(X.shape[0]),
+        "pseudotime_filter": pt_stats,
         "n_genes_input": int(X.shape[1]),
         "mapped_genes": int(mapped),
         "mapped_rate": float(mapped_rate),
@@ -909,6 +903,7 @@ def run_one_dataset(name: str, cfg: dict, model, config, gene2idx_model, out_roo
     # MODIFIED: 更新diagnostics，记录百分比相关信息
     diagnostics = {
         "n_cells": int(X.shape[0]),
+        "pseudotime_filter": pt_stats,
         "n_genes": int(X.shape[1]),
         "mapped_genes": int(mapped),
         "mapped_rate": float(mapped_rate),

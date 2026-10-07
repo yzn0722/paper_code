@@ -1,25 +1,28 @@
 # `upstream/dynamics/run_cross_dataset_grn_density.sh`
 
-File-level notes generated from the current server source by static inspection.
+Runs the repository's GRN trajectory generator for all six datasets, including
+hESC, then computes cross-dataset GRN density statistics.
 
-## Source notes
+Configure `repo_root`, `benchmark_root` and `python_bin` for your installation.
+The script locates both Python entry points relative to itself, avoiding an
+external copy in `FBplot/fig4`. It explicitly supplies `--ema-alpha 0.9` (90% old
+state, 10% prediction), leaves log1p disabled and uses the generator's native
+per-cell binning of vocabulary-mapped genes.
 
-Wrapper script; inspect the commands below in the linked source.
+```sh
+bash upstream/dynamics/run_cross_dataset_grn_density.sh
+```
 
-## Invocation
+Trajectory generation uses CUDA, nine iterations, at most 16 cells per group,
+batch size 4 and seed 0. The wrapper writes to new folders:
 
-Use `bash upstream/dynamics/run_cross_dataset_grn_density.sh` after reviewing required arguments, environment variables, and external paths.
+- `outputs/dynamic_grn_cross_dataset_binned_ema09`
+- `outputs/grn_density_cross_dataset_binned_ema09`
 
-## Referenced paths and file names
-
-These literals may designate inputs, outputs, or templates. Consult their surrounding source code for their role; these files are not included.
-
-- `/mnt/10T/yzn/anconda3/envs/singlecell/bin/python`
-- `/mnt/10T/yzn/benchmark_GRN`
-- `/mnt/10T/yzn/scGRN-Bench`
-
-## Data and runtime requirements
-
-Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
+This prevents automatic reuse of historical EMA-0.1 trajectories. A nonempty
+trajectory already present in the new folder is skipped; clear or choose a new
+output folder if inputs or other settings change. Logs are saved under the
+trajectory folder. Datasets, model checkpoints and generated results are not
+included. Real server execution is required to obtain updated density results.
 
 Source: [run_cross_dataset_grn_density.sh](run_cross_dataset_grn_density.sh)

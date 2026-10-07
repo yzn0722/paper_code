@@ -37,6 +37,16 @@ def reports():
 
 
 class DirectionTests(unittest.TestCase):
+    def test_none_keeps_medians_and_lag_spread_without_error_extents(self):
+        data = reports()
+        no_errors = plot.load_observed_with_lag_errors(Path('.'), 'none', data)
+        with_sd = plot.load_observed_with_lag_errors(Path('.'), 'sd', data)
+        np.testing.assert_array_equal(no_errors.transient_spearman, with_sd.transient_spearman)
+        np.testing.assert_array_equal(no_errors.lag_std, with_sd.lag_std)
+        self.assertTrue((no_errors.yerr_lo == 0).all())
+        self.assertTrue((no_errors.yerr_hi == 0).all())
+        self.assertTrue((no_errors.error_kind == 'none').all())
+
     def write_reports(self, directory, data):
         for key, report in data.items():
             (directory / f'weighted_grn_propagation_{key}.json').write_text(json.dumps(report), encoding='utf-8')

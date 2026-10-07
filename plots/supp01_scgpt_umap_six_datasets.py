@@ -9,6 +9,7 @@ be compared across panels as a shared embedding.
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -18,27 +19,23 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-import umap
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch
 from matplotlib.ticker import MaxNLocator
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from audit_panel_alignment import require_matplotlib_panel_alignment
-
-
 ROOT = Path("/mnt/10T/yzn/benchmark_GRN")
 SCGPT_REPO = ROOT / "pre_scgpt/scGPT"
 MODEL_DIR = SCGPT_REPO / "scgpt_human"
 SOURCE_DIR = ROOT / "pre_scgpt/0204code/Pseudotime_trajectory_plots_umap"
-OUTDIR = SOURCE_DIR / "six_dataset_joint_umap"
+OUTDIR = SOURCE_DIR / "six_dataset_joint_umap_binned_ema09"
 OUTPUT = OUTDIR / "scGPT_allcells_joint_umap_six_datasets_2x3"
 DATASETS = ("hESC", "hHep", "mHSC-E", "mHSC-GM", "mHSC-L", "mDC")
 PT_QUANTILE = 0.2
 GEN_ITERS = 16
 BATCH_SIZE = 16
-EMA_ALPHA = 0.1
+EMA_ALPHA = 0.9  # Retention: 0.9 * previous state + 0.1 * reconstruction.
 SEED = 42
 COLORS = {
     "early": "#E69F00",
@@ -47,42 +44,35 @@ COLORS = {
     "middle": "#9B9B9B",
 }
 
-sys.path.insert(0, str(SCGPT_REPO))
-from scgpt.model import TransformerModel  # noqa: E402
-from scgpt.tokenizer.gene_tokenizer import GeneVocab  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "upstream" / "dynamics"))
+from run_multimodel_pseudotime import bin_expr_to_0_50 as native_bin_expr
 
 
-def bin_expr_to_0_50(x: np.ndarray) -> np.ndarray:
-    x = np.nan_to_num(np.asarray(x, dtype=np.float32), nan=0.0)
-    x = np.clip(x, 0, None)
-    vmax = max(float(np.percentile(x, 99.5)), 1e-6)
-    return np.clip(x / vmax * 50.0, 0, 50).astype(np.float32)
+def bin_expr_to_0_50(x: np.ndarray, n_bins: int = 51) -> np.ndarray:
+    """Native per-cell scGPT quantile bins, with log1p disabled as in Methods."""
+    return native_bin_expr(x, do_log1p=False, n_bins=n_bins)
 
 
-def load_model(device: torch.device) -> tuple[TransformerModel, GeneVocab]:
-    with (MODEL_DIR / "args.json").open(encoding="utf-8") as handle:
-        cfg = json.load(handle)
+def load_input_config():
+    sys.path.insert(0, str(SCGPT_REPO))
+    from scgpt.tokenizer.gene_tokenizer import GeneVocab
+
+    cfg = json.loads((MODEL_DIR / "args.json").read_text(encoding="utf-8"))
     vocab = GeneVocab.from_file(MODEL_DIR / "vocab.json")
-    for token in ("<pad>", "<cls>", "<eoc>"):
-        if token not in vocab:
-            vocab.append_token(token)
-    model = TransformerModel(
-        ntoken=len(vocab), d_model=cfg["embsize"], nhead=cfg["nheads"],
-        d_hid=cfg["d_hid"], nlayers=cfg["nlayers"], vocab=vocab,
-        pad_value=cfg["pad_value"], n_input_bins=cfg.get("n_bins", 51),
-        use_fast_transformer=cfg.get("fast_transformer", True),
-    )
-    checkpoint = torch.load(MODEL_DIR / "best_model.pt", map_location="cpu")
-    model.load_state_dict(checkpoint, strict=False)
-    model = model.to(device).eval()
-    if device.type == "cuda":
-        model.half()
-    return model, vocab
+    return vocab, int(cfg.get("n_bins", 51))
+
+
+def load_model(device: torch.device):
+    from types import SimpleNamespace
+    from run_multimodel_pseudotime import load_scgpt_model
+
+    return load_scgpt_model(SimpleNamespace(scgpt_model_dir=str(MODEL_DIR),
+                                          scgpt_repo_dir=str(SCGPT_REPO)), device)
 
 
 @torch.no_grad()
 def generate_per_cell(
-    model: TransformerModel, vocab: GeneVocab, x_early: np.ndarray,
+    model, vocab, x_early: np.ndarray,
     genes: list[str], device: torch.device, dataset: str,
 ) -> np.ndarray:
     gene_names = [gene.upper() for gene in genes]
@@ -111,7 +101,7 @@ def generate_per_cell(
     return vals_all[:, 1:].float().numpy()
 
 
-def load_dataset(dataset: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
+def load_dataset(dataset: str, vocab, n_bins: int = 51) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
     expr_path = ROOT / "input_process/CHIP" / f"{dataset}_chip_matched-ExpressionData.csv"
     pt_path = ROOT / "PseudoTime" / dataset / "PseudoTime.csv"
     expr = pd.read_csv(expr_path, index_col=0)
@@ -130,7 +120,12 @@ def load_dataset(dataset: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, list
     if len(pt) < 10:
         raise ValueError(f"{dataset}: too few valid pseudotime cells")
     genes = expr.index.astype(str).tolist()
-    x_all = bin_expr_to_0_50(expr.T.to_numpy(dtype=np.float32))
+    mapped = np.array([gene.upper() in vocab for gene in genes], dtype=bool)
+    if not mapped.any():
+        raise ValueError(f"{dataset}: no genes mapped to scGPT vocabulary")
+    raw = expr.T.to_numpy(dtype=np.float32)
+    x_all = np.zeros_like(raw, dtype=np.float32)
+    x_all[:, mapped] = bin_expr_to_0_50(raw[:, mapped], n_bins=n_bins)
     lo, hi = np.quantile(pt, [PT_QUANTILE, 1.0 - PT_QUANTILE])
     early_mask, late_mask = pt <= lo, pt >= hi
     if np.any(early_mask & late_mask):
@@ -143,36 +138,77 @@ def load_dataset(dataset: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, list
         "middle": int(middle_mask.sum()), "late": int(late_mask.sum()),
         "quantile": PT_QUANTILE, "early_threshold": float(lo),
         "late_threshold": float(hi),
+        "mapped_genes": int(mapped.sum()), "value_preprocessing": "scgpt.preprocess.binning",
+        "n_bins": n_bins, "log1p": False, "ema_alpha": EMA_ALPHA,
+        "ema_definition": "alpha * previous + (1-alpha) * prediction",
     }
     return x_all[early_mask], x_all[middle_mask], x_all[late_mask], genes, summary
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def prediction_identity(x_early, genes, state):
+    if "model_file_hashes" not in state:
+        state["model_file_hashes"] = {
+            name: _file_sha256(MODEL_DIR / name)
+            for name in ("args.json", "vocab.json", "best_model.pt")
+        }
+    return {
+        "protocol_version": 1, "ema_alpha": EMA_ALPHA, "gen_iters": GEN_ITERS,
+        "batch_size": BATCH_SIZE, "seed": SEED,
+        "log1p": False, "n_bins": state["n_bins"],
+        "value_preprocessing": "native_per_cell_bins_of_mapped_genes",
+        "input_shape": list(x_early.shape),
+        "input_sha256": hashlib.sha256(np.ascontiguousarray(x_early, dtype=np.float32).tobytes()).hexdigest(),
+        "genes": genes, "model_files": state["model_file_hashes"],
+        "source_sha256": _file_sha256(Path(__file__)),
+    }
 
 
 def get_prediction(
     dataset: str, x_early: np.ndarray, genes: list[str],
     device: torch.device, state: dict,
 ) -> np.ndarray:
-    if dataset == "mHSC-L":
-        path = SOURCE_DIR / "mHSC-L_scgpt_early_trueLate_predLate_joint_umap_predicted_cells.npy"
-        source = "existing original mHSC-L prediction"
-    else:
-        path = OUTDIR / f"{dataset}_scgpt_early_to_latelike_predicted_cells.npy"
-        source = "cached prediction" if path.exists() else "new prediction"
-    if path.exists():
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    path = OUTDIR / f"{dataset}_scgpt_early_to_latelike_predicted_cells.npy"
+    manifest_path = path.with_suffix(".json")
+    identity = prediction_identity(x_early, genes, state)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    reusable = (path.exists() and manifest.get("identity") == identity
+                and manifest.get("prediction_sha256") == _file_sha256(path))
+    source = "validated current-protocol cache" if reusable else "new current-protocol prediction"
+    if reusable:
         x_pred = np.load(path).astype(np.float32)
     else:
         if "model" not in state:
             state["model"], state["vocab"] = load_model(device)
         x_pred = generate_per_cell(state["model"], state["vocab"], x_early, genes, device, dataset)
-        np.save(path, x_pred)
     if x_pred.shape != x_early.shape or not np.isfinite(x_pred).all():
         raise ValueError(f"{dataset}: invalid prediction shape or nonfinite values: {x_pred.shape}")
+    if not reusable:
+        np.save(path, x_pred)
+        manifest_path.write_text(json.dumps({"identity": identity,
+                                            "prediction_sha256": _file_sha256(path)}, indent=2), encoding="utf-8")
     print(f"{dataset}: {source}; prediction shape={x_pred.shape}", flush=True)
     return x_pred
 
 
 def embed_dataset(dataset: str, device: torch.device, state: dict) -> None:
+    import umap
+
+    # Native binning may randomize quantile ties. Reset independently of cache hits.
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
     cache = OUTDIR / f"{dataset}_joint_umap_coordinates.npz"
-    x_early, x_middle, x_late, genes, summary = load_dataset(dataset)
+    if "vocab" not in state:
+        state["vocab"], state["n_bins"] = load_input_config()
+    x_early, x_middle, x_late, genes, summary = load_dataset(dataset, state["vocab"], state["n_bins"])
     x_pred = get_prediction(dataset, x_early, genes, device, state)
     combined = np.vstack([x_early, x_middle, x_late, x_pred]).astype(np.float32)
     scaled = StandardScaler().fit_transform(combined)
@@ -237,6 +273,24 @@ def plot_panel(ax: plt.Axes, dataset: str) -> None:
     ax.spines["bottom"].set_linewidth(1.4)
 
 
+def check_panel_alignment(fig, axes) -> None:
+    """Check actual 2-by-3 axes bounds without an external audit-module import."""
+    width, height = fig.get_size_inches() * 72
+    boxes = np.array([ax.get_position().bounds for ax in axes.flat]).reshape(2, 3, 4)
+    boxes *= np.array([width, height, width, height])
+    checks = {
+        "equal_width": float(np.ptp(boxes[:, :, 2])),
+        "equal_height": float(np.ptp(boxes[:, :, 3])),
+        "row_alignment": float(max(np.ptp(row[:, 1]) for row in boxes)),
+        "column_alignment": float(max(np.ptp(boxes[:, j, 0]) for j in range(3))),
+    }
+    report = {"axes_bounds_pt": boxes.tolist(), "deviations_pt": checks,
+              "tolerance_pt": 1.5, "pass": all(v <= 1.5 for v in checks.values())}
+    Path(str(OUTPUT) + ".alignment.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if not report["pass"]:
+        raise RuntimeError(f"UMAP panels are misaligned: {checks}")
+
+
 def plot_composite() -> None:
     mpl.rcParams.update({
         "font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"],
@@ -262,12 +316,7 @@ def plot_composite() -> None:
     fig.subplots_adjust(left=0.07, right=0.985, bottom=0.075,
                         top=0.89, wspace=0.23, hspace=0.34)
     fig.canvas.draw()
-    require_matplotlib_panel_alignment(
-        fig, json_out=str(OUTPUT) + ".alignment.json",
-        overlay_svg=str(OUTPUT) + ".alignment.svg",
-        tolerance_pt=1.5, gutter_tolerance_pt=1.5,
-        require_panel_labels=False, strict=True,
-    )
+    check_panel_alignment(fig, axes)
     fig.savefig(OUTPUT.with_suffix(".pdf"), dpi=300)
     fig.savefig(OUTPUT.with_suffix(".png"), dpi=300)
     plt.close(fig)

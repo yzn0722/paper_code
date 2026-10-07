@@ -45,7 +45,7 @@ Imports found in the source (standard library and external modules): `argparse`,
 - `--gen-iters`
 - `--batch-size`
 - `--max-early-cells`: Token models only: 参与迭代的 early 细胞数上限（0=使用全部 early，与 true_delta 的 early 定义一致）。旧版曾只用前 batch_size 个细胞，会导致预测均值与全数据上的 late−early 不对齐。
-- `--acc-eps`: 方向准确率：|delta|<=eps 的基因不定义 Up/Down（与 scFoundation EPS_DIR 一致；设 0 恢复旧口径）。
+- `--acc-eps`: Balanced accuracy threshold (default `1e-3`): near-zero truth excluded; near-zero prediction incorrect; exact zero remains undefined even at eps=0.
 - `--max-len`
 - `--mask-ratio`
 - `--topk-sample`
@@ -144,3 +144,49 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [run_multimodel_pseudotime.py](run_multimodel_pseudotime.py)
+
+## scGPT pretrained checkpoint validation
+
+`load_scgpt_model` uses the sibling [scgpt_checkpoint.py](scgpt_checkpoint.py); deploy them together. It requires complete, shape-compatible gene/value encoder, transformer and expression decoder weights for the dynamic `mlm_output` probe. Missing/incompatible required weights, unexpected dynamic-backbone keys and conflicting QKV aliases stop execution. Packed FlashAttention/PyTorch QKV names are translated without changing tensor values. Common checkpoint wrappers and a uniform `module.` prefix are supported.
+
+The console reports missing/unexpected keys, shape mismatches and translations; `model.checkpoint_load_report` stores the report. Unused auxiliary CLS/MVC/DAB heads may remain unloaded, with explicit diagnostics. Other model loaders are unchanged. Real checkpoint validation and full analysis reruns still require the server environment and inputs.
+
+
+## Balanced accuracy output (2026-10-07)
+
+Direction scores now use the shared `direction_metrics.py`: first select the
+requested top percentage by absolute true change within mapped genes, then
+exclude true deltas with `|delta| <= eps`. The score is the mean of Up and Down
+recall. If only one truth class remains, use that class's recall, matching the
+formal evaluators; if none remains, report NaN. Near-zero or nonfinite predictions
+are incorrect for nonzero truth, and nonfinite truth is excluded. No direction,
+including an exact zero at eps=0, is silently assigned to Down.
+
+The default threshold is `1e-3`. The unified runner's scFoundation branch uses
+`--scf-eps-dir`; its other branches and scPRINT use `--acc-eps`. CSV sign labels
+use the same configured threshold as the curves. `final_acc_inv_truth` retains
+its compatibility name but now means inverted-truth balanced accuracy; it is
+not necessarily `1 - BA`, because undefined predictions are wrong in both
+comparisons. Token-model rollback restores both recorded BA scores.
+
+Outputs:
+- `balanced_accuracy_curves.json`: per-dataset BA curves.
+- `accuracy_curves.json`: identical compatibility alias, also BA.
+- `metric_metadata.json`: metric/version, threshold and scoring policy.
+- `diagnostics.json`: the same metric policy and dataset diagnostics.
+
+Old output files are not converted by changing this code. Rerun scoring or the
+analysis before replacing figure source data. Fig. 5c and the supplemental
+convergence loaders now validate new BA outputs using their metadata. For old
+outputs they validate the historical ordinary-accuracy reference separately,
+then recalculate the displayed BA with the default threshold. Fig. 5f consumes a
+static summary CSV whose original producer has not been located; this code
+change alone does not update or verify it. Fig. 6a recalculates BA from scGPT
+per-gene CSVs and does not consume these accuracy-curve JSON files; Fig. 6c/d use
+propagation scores rather than these direction scores.
+
+Validation: both command-line `--help` paths work without loading checkpoints.
+CPU regression fixtures cover the 0.75 ordinary accuracy / 0.50 BA example,
+near-zero handling, single/empty classes, model iteration, CSV/JSON export and
+figure loaders. These fixtures use tiny deterministic models; full pretrained
+runs still require the external model dependencies, checkpoints and datasets.

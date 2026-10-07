@@ -12,14 +12,22 @@ python plots/fig06c_plot_density_hESC.py \
 ```
 
 Points: median Spearman rho across the first eight early refinement lags.
-Default error bars: lag sample SD (`ddof=1`), not independent-replicate SD.
-`--error sem` and `--error iqr` select alternative descriptive lag spreads.
+Default `--error none`: no vertical error bars on the observed median scores.
+The eight lags come from one iterative trajectory and share successive states;
+their spread does not estimate uncertainty from independent experiments.
+Descriptive lag SD and quantiles remain in the exported CSV. The legacy
+`--error sd`, `--error sem`, and `--error iqr` modes are retained for explicitly
+requested descriptive displays; they are not the manuscript default.
 Grey reference: pooled mean and 5th–95th percentile of 3 x 200 rewired draws
-from the same direction/window/reports as the observed points. The former
+from the same direction/window/reports as the observed points. Its percentile
+range is shown only by shading, with no redundant vertical bars on the mean.
+The shading is a null-distribution range, not a confidence interval for observed
+scores. Empirical P values still use each representation's own 200 rewirings.
+The former
 `--plot-data` argument is removed to prevent reuse of an old-direction null.
 
 The loader checks trajectory dimensions, available input hashes, exactly
 200 finite draws per representation/density, eight-lag windows and agreement
 between saved observed summaries and lag medians. It emits PDF/SVG/PNG,
-observed/pool source CSVs and a manifest with input JSON/script hashes.
+`fig06c_density_source_data.csv`, pooled-null CSV and a manifest with input JSON/script hashes.
 Defaults point to the new `outputs/fig06c/query_to_key` directory.

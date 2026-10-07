@@ -53,7 +53,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gen-iters", type=int, default=32)
     p.add_argument("--max-cells", type=int, default=16, help="Maximum cells per early/middle/late start group.")
     p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--ema-alpha", type=float, default=0.1)
+    p.add_argument("--ema-alpha", type=float, default=0.9,
+                   help="Retention on previous state: alpha*x + (1-alpha)*prediction; Methods alpha=0.9.")
     p.add_argument("--pt-quantile", type=float, default=0.2)
     p.add_argument("--top-percent", type=int, default=30)
     p.add_argument("--convergence-tol", type=float, default=1e-4)
@@ -70,9 +71,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--memory-limit-gb", type=float, default=4.0)
     p.add_argument("--cpu-threads", type=int, default=2, help="PyTorch CPU thread cap for this process.")
 
-    # Compatibility fields consumed by ScgptBundle.
-    p.add_argument("--scgpt-bin-log1p", action="store_true", default=False)
-    p.add_argument("--scgpt-legacy-pt", action="store_true", default=True)
+    p.add_argument("--scgpt-bin-log1p", action="store_true", default=False,
+                   help="Optional sensitivity setting; leave disabled for the Methods protocol.")
+    p.add_argument("--scgpt-legacy-pt", action="store_true", default=True,
+                   help="Deprecated compatibility flag; pseudotime uses the shared reader.")
     p.add_argument("--top-grn-edges", type=int, default=5000)
     p.add_argument("--print-every", type=int, default=4)
     p.set_defaults(grn_source="chip", max_early_cells=16)
@@ -222,6 +224,60 @@ def resolve_input_paths(args: argparse.Namespace) -> Dict[str, Path]:
     }
 
 
+def build_scgpt_bundle(args):
+    """Initialize mapped per-cell native bins through the formal scGPT loader."""
+    import torch
+    from types import SimpleNamespace
+    sys.path.insert(0, str(HERE))
+    from run_multimodel_pseudotime import load_scgpt_model, read_pt_file, bin_expr_to_0_50
+
+    paths = resolve_input_paths(args)
+    expr = pd.read_csv(paths["expression"], index_col=0)
+    pt_frame = read_pt_file(paths["pseudotime"])
+    common = expr.columns.intersection(pt_frame.index)
+    if not len(common):
+        raise ValueError("No shared expression/pseudotime cell IDs")
+    pt = pt_frame.loc[common, "pt"].to_numpy(float)
+    valid = np.isfinite(pt)
+    expr, pt = expr.loc[:, common[valid]], pt[valid]
+    if not len(pt):
+        raise ValueError("No finite pseudotime cells")
+    genes = [str(g).upper() for g in expr.index]
+    if len(set(genes)) != len(genes):
+        raise ValueError("Gene names must be unique after uppercasing")
+    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available()
+                          else "cpu" if args.device == "auto" else args.device)
+    model, vocab = load_scgpt_model(args, device)
+    cfg = json.loads((paths["model"] / "args.json").read_text(encoding="utf-8"))
+    n_bins = int(cfg.get("n_bins", 51))
+    mapped = np.array([gene in vocab for gene in genes], dtype=bool)
+    if not mapped.any():
+        raise ValueError("No genes mapped to scGPT vocabulary")
+    raw = expr.T.to_numpy(dtype=np.float32)
+    x = np.zeros_like(raw)
+    x[:, mapped] = bin_expr_to_0_50(raw[:, mapped],
+                                  do_log1p=args.scgpt_bin_log1p, n_bins=n_bins)
+    lo, hi = np.quantile(pt, [args.pt_quantile, 1-args.pt_quantile])
+    early, late = pt <= lo, pt >= hi
+    mid = ~(early | late)
+    if not early.any() or not mid.any() or not late.any() or np.any(early & late):
+        raise ValueError("Pseudotime must define distinct nonempty early/middle/late groups")
+    gene_ids = np.array([vocab["<cls>"]] + [vocab[g] if g in vocab else vocab["<pad>"] for g in genes])
+    ids = torch.tensor(gene_ids[None, :], dtype=torch.long)
+    values = np.concatenate([np.zeros((len(x), 1), dtype=np.float32), x], axis=1)
+    edges = pd.read_csv(paths["chip_grn"])
+    if edges.shape[1] < 2:
+        raise ValueError("CHIP network requires source and target columns")
+    edges = edges.rename(columns={edges.columns[0]: "Gene1", edges.columns[1]: "Gene2"})
+    return SimpleNamespace(model=model, vocab=vocab, device=device, genes=genes,
+                           gene_to_idx={g: i for i, g in enumerate(genes)},
+                           gene_ids_tensor=ids, pad_mask=ids.eq(vocab["<pad>"]).expand(len(x), -1),
+                           values_tensor=torch.tensor(values, dtype=torch.float16 if device.type == "cuda" else torch.float32),
+                           early=early, mid=mid, late=late, early_mean=x[early].mean(0),
+                           late_mean=x[late].mean(0), global_mean=x.mean(0),
+                           chip_edges=edges, n_bins=n_bins)
+
+
 def preflight(args: argparse.Namespace) -> dict:
     if args.gen_iters < 2 or args.max_cells < 1 or args.batch_size < 1:
         raise ValueError("gen-iters >= 2, max-cells >= 1 and batch-size >= 1 are required")
@@ -273,6 +329,10 @@ def preflight(args: argparse.Namespace) -> dict:
             "memory_limit_gb": args.memory_limit_gb,
             "cpu_threads": args.cpu_threads,
         },
+        "protocol": {"ema_alpha": args.ema_alpha,
+                     "ema_definition": "alpha * previous + (1-alpha) * prediction",
+                     "value_preprocessing": "scgpt.preprocess.binning on mapped genes per cell",
+                     "log1p": args.scgpt_bin_log1p},
     }
     print(json.dumps(report, indent=2, ensure_ascii=False))
     if missing:
@@ -435,11 +495,11 @@ def execute(args: argparse.Namespace, preflight_report: dict) -> None:
     except RuntimeError:
         pass
     sys.path.insert(0, str(HERE))
-    from run_grn_perturbation_probes import ScgptBundle, set_seed
+    from run_multimodel_pseudotime import set_seed
 
     set_seed(args.seed)
     args.max_early_cells = args.max_cells
-    bundle = ScgptBundle(args)
+    bundle = build_scgpt_bundle(args)
     rng = np.random.default_rng(args.seed)
     estimated_tensor_bytes = 3 * args.max_cells * (len(bundle.genes) + 1) * 4
     if estimated_tensor_bytes > args.memory_limit_gb * (1024**3):
@@ -487,6 +547,10 @@ def execute(args: argparse.Namespace, preflight_report: dict) -> None:
         "dataset": args.dataset,
         "n_genes": len(bundle.genes),
         "n_mapped_genes": int(len(mapped_idx)),
+        "protocol": {"ema_alpha": args.ema_alpha,
+                     "ema_definition": "alpha * previous + (1-alpha) * prediction",
+                     "value_preprocessing": "scgpt.preprocess.binning on mapped genes per cell",
+                     "log1p": args.scgpt_bin_log1p, "n_bins": bundle.n_bins},
         "group_sizes": {k: int(len(v)) for k, v in groups.items()},
         "metrics": metrics,
         "reviewer_checks": {

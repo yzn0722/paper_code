@@ -1,47 +1,51 @@
 # `plots/supp01_scgpt_umap_six_datasets.py`
 
-File-level notes generated from the current server source by static inspection.
+Produces six dataset-specific joint UMAP panels of observed early, intermediate,
+late, and scGPT-refined early cells. Each panel fits its own scaler, PCA and UMAP;
+coordinates must not be compared between panels as a shared embedding.
 
-## Purpose (source docstring)
+## Dynamics protocol
 
-Six dataset-specific joint UMAPs, following the mHSC-L all-cell workflow.
+- Match uppercased gene names to the checkpoint vocabulary.
+- Apply native `scgpt.preprocess.binning` separately to each cell's mapped genes,
+  using checkpoint `n_bins` (51 if absent), with log1p disabled. Unmapped genes
+  are zero-filled and assigned padding tokens.
+- Bin observed early/intermediate/late profiles once. Refine each early cell for
+  16 iterations using `0.9 * previous + 0.1 * mlm_output`, without re-binning.
+  Padding positions and the CLS value remain fixed.
+- Reuse the formal dynamics loader and its critical checkpoint coverage checks.
+- Reset seed 42 before each dataset so quantile tie handling does not depend on
+  whether previous datasets used cached predictions.
 
-Each panel fits its own scaler, PCA, and UMAP to its observed early,
-intermediate, late, and scGPT-predicted late-like cells. Coordinates must not
-be compared across panels as a shared embedding.
+## Inputs, dependencies and invocation
 
-## Dependencies
+Configure `ROOT`, `SCGPT_REPO` and `MODEL_DIR` in the script for your installation.
+Inputs are expression CSVs under `ROOT/input_process/CHIP`, pseudotime CSVs under
+`ROOT/PseudoTime/<dataset>`, and checkpoint `args.json`, `vocab.json`, `best_model.pt`.
 
-Imports found in the source (standard library and external modules): `__future__`, `audit_panel_alignment`, `gc`, `json`, `matplotlib`, `numpy`, `pandas`, `pathlib`, `scgpt`, `sklearn`, `sys`, `torch`, `umap`.
+Requires NumPy, pandas, PyTorch, Matplotlib, scikit-learn, umap-learn and the scGPT
+source/dependencies, plus this repository's dynamics modules. The main entry
+requires a CUDA device. Run from the repository root:
 
-## Defined interfaces
+```sh
+python plots/supp01_scgpt_umap_six_datasets.py
+```
 
-`bin_expr_to_0_50`, `load_model`, `generate_per_cell`, `load_dataset`, `get_prediction`, `embed_dataset`, `plot_panel`, `plot_composite`, `main`
+## Outputs and cache migration
 
-## Invocation
+Outputs now use `six_dataset_joint_umap_binned_ema09` under `SOURCE_DIR`.
+Older percentile-scaled/EMA-0.1 outputs, including the special old mHSC-L cache,
+are not read. A prediction NPY is reusable only when its JSON manifest matches
+parameters, binned input hash, gene order, checkpoint/configuration hashes and
+script hash, and the prediction file hash matches. Otherwise it is regenerated.
 
-Run `python plots/supp01_scgpt_umap_six_datasets.py` from the repository root after supplying the external inputs and configuring paths. Review argument defaults before running.
+Outputs include predicted-cell NPYs and manifests, joint coordinate NPZs,
+data-summary JSONs and a six-panel PDF/PNG. The internal alignment check writes
+`.alignment.json` and checks equal axes widths/heights and row/column alignment
+with a 1.5-point tolerance; no external `audit_panel_alignment` module is needed.
 
-## Referenced paths and file names
-
-These literals may designate inputs, outputs, or templates. Consult their surrounding source code for their role; these files are not included.
-
-- `.alignment.json`
-- `.pdf`
-- `.png`
-- `/mnt/10T/yzn/benchmark_GRN`
-- `PseudoTime.csv`
-- `_chip_matched-ExpressionData.csv`
-- `_data_summary.json`
-- `_joint_umap_coordinates.npz`
-- `_scgpt_early_to_latelike_predicted_cells.npy`
-- `args.json`
-- `best_model.pt`
-- `mHSC-L_scgpt_early_trueLate_predLate_joint_umap_predicted_cells.npy`
-- `vocab.json`
-
-## Data and runtime requirements
-
-Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
+CPU protocol validation uses deterministic fixtures in
+`tests/test_scgpt_dynamics_protocol.py`; it does not establish that real pretrained
+inference, UMAP embedding or manuscript figures have been rerun.
 
 Source: [supp01_scgpt_umap_six_datasets.py](supp01_scgpt_umap_six_datasets.py)

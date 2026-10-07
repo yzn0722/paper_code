@@ -69,6 +69,9 @@ EPS_DIR = 1e-3
 # scGPT
 # =====================================================
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pseudotime_utils import load_aligned_pseudotime, split_pseudotime_quantiles
+
 sys.path.insert(0, "/mnt/10T/yzn/benchmark_GRN/pre_scgpt/scGPT")
 from scgpt.model import TransformerModel
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
@@ -124,6 +127,12 @@ def balanced_direction_accuracy(pred_delta, true_delta, eval_idx, eps=EPS_DIR):
 # Build model
 # =====================================================
 def build_model(model_dir, device):
+    # Also works when this evaluator is imported by file path by the seeded runner.
+    helper_dir = str(Path(__file__).resolve().parent)
+    if helper_dir not in sys.path:
+        sys.path.insert(0, helper_dir)
+    from scgpt_checkpoint import load_scgpt_dynamics_checkpoint
+
     with open(Path(model_dir) / "args.json") as f:
         cfg = json.load(f)
 
@@ -145,7 +154,9 @@ def build_model(model_dir, device):
     )
 
     ckpt = torch.load(Path(model_dir) / "best_model.pt", map_location="cpu")
-    model.load_state_dict(ckpt, strict=False)
+    model.checkpoint_load_report = load_scgpt_dynamics_checkpoint(
+        model, ckpt, checkpoint_path=Path(model_dir) / "best_model.pt"
+    )
     model.to(device)
     model.eval()
 
@@ -217,12 +228,9 @@ def run_dataset(name, cfg, model, vocab, device, outdir):
     print(f"{'='*60}")
 
     expr = pd.read_csv(cfg["expr_csv"], index_col=0)
-    pt_df = pd.read_csv(cfg["pt_csv"])
-    pt_df = pt_df.rename(columns={pt_df.columns[0]: "cell", pt_df.columns[1]: "pt"}).set_index("cell")
-
-    common = expr.columns.intersection(pt_df.index)
-    expr = expr[common]
-    pt = pt_df.loc[common, "pt"].to_numpy()
+    expr, pt, pt_stats = load_aligned_pseudotime(expr, cfg["pt_csv"])
+    early, late, lo, hi = split_pseudotime_quantiles(pt, PT_QUANTILE)
+    print(f"  [INFO] Dropped invalid matched pseudotime cells: {pt_stats['invalid_matched_pseudotime_cells']}")
 
     # 获取原始基因名；统一大写以匹配 scGPT human vocab
     genes_original = expr.index.astype(str).tolist()
@@ -236,7 +244,7 @@ def run_dataset(name, cfg, model, vocab, device, outdir):
     match_rate = matched / max(len(genes), 1) * 100
     print(f"  [INFO] Total genes: {len(genes)}")
     print(f"  [INFO] Vocab matched: {matched} ({match_rate:.1f}%)")
-    print(f"  [INFO] Total cells: {len(common)}")
+    print(f"  [INFO] Total valid cells: {len(pt)}")
 
     X = expr.T.to_numpy(dtype=np.float32)
     with open(Path(MODEL_DIR) / "args.json") as f:
@@ -248,9 +256,6 @@ def run_dataset(name, cfg, model, vocab, device, outdir):
         X[:, is_mapped], do_log1p=(not NO_LOG1P), n_bins=n_bins
     )
 
-    lo, hi = np.quantile(pt, [PT_QUANTILE, 1 - PT_QUANTILE])
-    early = pt <= lo
-    late = pt >= hi
     print(f"  [INFO] Early cells (pt <= {lo:.3f}): {early.sum()}")
     print(f"  [INFO] Late cells (pt >= {hi:.3f}): {late.sum()}")
 
@@ -334,7 +339,8 @@ def run_dataset(name, cfg, model, vocab, device, outdir):
     # 诊断信息
     diagnostics = {
         "n_genes": len(genes),
-        "n_cells": len(common),
+        "n_cells": len(pt),
+        "pseudotime_filter": pt_stats,
         "vocab_match_rate": match_rate,
         "top_vocab_match_rate": top_match_rate,
         "n_early": int(early.sum()),

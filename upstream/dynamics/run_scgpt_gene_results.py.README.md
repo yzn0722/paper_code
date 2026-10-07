@@ -52,3 +52,21 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [run_scgpt_gene_results.py](run_scgpt_gene_results.py)
+
+## Finite pseudotime validation
+
+Keep the sibling `pseudotime_utils.py` alongside this evaluator. Before binning
+or inference, the runner coerces pseudotime to numeric and jointly removes cells
+with nonnumeric, NaN or infinite pseudotime from the expression matrix and time
+vector. It preserves expression column order and the inclusive bottom/top 20%
+quantile rule for valid input. No shared/valid cells, duplicate/missing time-file
+cell IDs or overlapping early/late groups raise `ValueError`. Filter counts are
+printed and saved under `pseudotime_filter` in diagnostics; `n_cells` counts the
+retained valid shared cells. Historical outputs require rerunning to reflect
+this correction.
+
+## Pretrained checkpoint validation
+
+`build_model` uses the sibling [scgpt_checkpoint.py](scgpt_checkpoint.py). Keep the helper beside the evaluator when copying it to the server. Before device transfer or evaluation, all gene/value encoder, transformer and expression decoder weights used by `mlm_output` must exist with matching shapes. Missing/incompatible required weights, unexpected dynamic-backbone keys and conflicting QKV aliases raise `RuntimeError`.
+
+Packed FlashAttention `Wqkv.weight/bias` and PyTorch `in_proj_weight/bias` names are translated without changing tensors. The console reports missing/unexpected keys, shape mismatches and translations despite suppressed Python warnings. `model.checkpoint_load_report` retains the JSON-safe report. Unused auxiliary CLS/MVC/DAB heads may remain unloaded, with explicit diagnostics. Historical result validity still requires loading the real checkpoint and rerunning the analysis.

@@ -8,7 +8,21 @@ Imports found in the source (standard library and external modules): `argparse`,
 
 ## Defined interfaces
 
-`calculate_method_precision`, `plot_three_methods_grn_curve`, `parse_args`
+`reference_edges_and_candidates`, `calculate_method_precision`, `plot_three_methods_grn_curve`, `parse_args`
+
+## Random reference and candidate space
+
+The precision curves and random reference use the same cleaned ground-truth gene
+set. With `TFEdges=True`, candidates are ground-truth TF sources paired with all
+reference genes, excluding self-links. With `TFEdges=False`, candidates are all
+ordered pairs of reference genes except self-links. Duplicate reference and
+prediction pairs are counted once; invalid sources/targets are excluded.
+
+The random precision is `unique_ground_truth_edges / candidate_pairs`, not the
+density among all gene pairs when TF filtering is enabled. Exported curve CSVs
+include `CandidateEdgesTotal` and `RandomPrecision` so the reference can be audited.
+
+Regression checks: `python -m unittest discover -s tests -p test_fig04a_candidates.py`.
 
 ## Command-line parameters
 

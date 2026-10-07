@@ -6,7 +6,7 @@ Unified pseudotime benchmark entry for Geneformer / LangCell / scGPT / scFoundat
 方向准确率定义（各连续模型一致）：
   true_delta = late 细胞基因均值 − early 细胞基因均值；
   pred_delta = 迭代后预测（early 细胞上平均）− 同一 early 基线均值；
-  在 |true_delta| 最大的 top% 基因上比较 sign(pred_delta) 与 sign(true_delta)。
+  在已映射基因中选 |true_delta| 最大的 top%，计算 Up/Down recall 的平均值（balanced accuracy）。
 
 Token 模型用排位变化经负号与表达变化对齐（见 direction_accuracy_top_genes 与代码注释）。
 
@@ -32,7 +32,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BertForMaskedLM, BertModel
+try:
+    from .direction_metrics import (EPS_DIR, balanced_direction_accuracy,
+                                    direction_signs, metric_metadata, save_accuracy_curves)
+except ImportError:  # Direct script execution.
+    from direction_metrics import (EPS_DIR, balanced_direction_accuracy,
+                                   direction_signs, metric_metadata, save_accuracy_curves)
+
 
 warnings.filterwarnings("ignore")
 
@@ -140,7 +146,7 @@ def parse_args():
         "--acc-eps",
         type=float,
         default=1e-3,
-        help="方向准确率：|delta|<=eps 的基因不定义 Up/Down（与 scFoundation EPS_DIR 一致；设 0 恢复旧口径）。",
+        help="Balanced accuracy：默认 eps=1e-3；近零真实变化排除，近零预测计错；eps=0 时精确零仍不属于 Down。",
     )
     parser.add_argument("--max-len", type=int, default=1024)
     parser.add_argument("--mask-ratio", type=float, default=0.3)
@@ -163,7 +169,7 @@ def parse_args():
         "--force-nondecreasing-acc",
         action="store_true",
         default=False,
-        help="Token models only: revert iteration updates when accuracy decreases.",
+        help="Token models only: revert iteration updates when balanced accuracy decreases.",
     )
     parser.add_argument(
         "--restrict-to-dataset-genes",
@@ -222,7 +228,7 @@ def parse_args():
     parser.add_argument("--scf-value-mask-prob", type=float, default=0.3)
     parser.add_argument("--scf-zero-mask-prob", type=float, default=0.0)
     parser.add_argument("--scf-update-scope", choices=["present_all", "mask", "zero"], default="present_all")
-    parser.add_argument("--scf-eps-dir", type=float, default=1e-3, help="Threshold for up/down vs zero in direction accuracy.")
+    parser.add_argument("--scf-eps-dir", type=float, default=1e-3, help="Threshold for Up/Down in scFoundation balanced accuracy (default 1e-3).")
     parser.add_argument(
         "--scf-no-refresh-encoder",
         action="store_true",
@@ -282,35 +288,14 @@ def direction_accuracy_top_genes(
     pred_delta: np.ndarray,
     true_delta: np.ndarray,
     top_idx: np.ndarray,
-    eps: float = 0.0,
+    eps: float = EPS_DIR,
 ) -> Tuple[float, float]:
-    """
-    方向准确率：与「真实变化 = 晚期均值 − 早期均值」「预测变化 = 预测终态 − 早期均值」在符号上是否一致。
+    """Return balanced direction accuracy and inverted-truth BA (legacy API name).
 
-    - pred_delta: 每个基因上「预测相对 early 基线」的变化（与 scGPT 的 pred_mean − early_mean 同义）。
-    - true_delta: 每个基因上 late_mean − early_mean。
-    - top_idx: 在 |true_delta| 最大的 top% 基因上评估（由调用方事先算好；应仅为 mapped 基因）。
-    - eps: 若 >0，则仅对 |true_delta| > eps 的基因计分；|pred_delta| <= eps 计为错误（非 Down）。
-      默认建议与 scFoundation 一致用 1e-3（见 --acc-eps）。
+    Near-zero truth is excluded; near-zero prediction is incorrect. Even when
+    eps=0, exact zero is undefined and is never assigned to Down.
     """
-    td = true_delta[top_idx]
-    pd = pred_delta[top_idx]
-    if eps > 0.0:
-        true_dir = np.where(td > eps, 1, np.where(td < -eps, -1, 0))
-        pred_dir = np.where(pd > eps, 1, np.where(pd < -eps, -1, 0))
-        valid = true_dir != 0
-        if not np.any(valid):
-            return float("nan"), float("nan")
-        acc = float((pred_dir[valid] == true_dir[valid]).mean())
-        inv = float((pred_dir[valid] == (-true_dir[valid])).mean())
-        return acc, inv
-    # Legacy (eps==0): keep old CSV convention for backward-compatible dry runs.
-    # Prefer calling with --acc-eps 1e-3.
-    true_dir = np.where(td > 0, 1, -1)
-    pred_dir = np.where(pd > 0, 1, -1)
-    acc = float((pred_dir == true_dir).mean())
-    inv = float((pred_dir == (-true_dir)).mean())
-    return acc, inv
+    return balanced_direction_accuracy(pred_delta, true_delta, top_idx, eps)
 
 
 def normalize_symbol(s: str) -> str:
@@ -429,6 +414,8 @@ def build_symbol_to_ensembl_map(gene_name_id: Dict[str, str]) -> Dict[str, str]:
 class LangCellModel(nn.Module):
     def __init__(self, model_dir: str):
         super().__init__()
+        from transformers import BertModel
+
         self.bert = BertModel.from_pretrained(model_dir, add_pooling_layer=False)
         self.cls = nn.Linear(self.bert.config.hidden_size, self.bert.config.vocab_size)
 
@@ -738,6 +725,7 @@ def run_token_model_dataset(
     acc_curve_inv_truth = []
     mean_delta_by_iter: List[np.ndarray] = []
     best_acc = -1.0
+    best_inv = float("nan")
 
     for it in range(args.gen_iters):
         prev_state = [arr.copy() for arr in curr_cells]
@@ -778,14 +766,14 @@ def run_token_model_dataset(
             pred_delta_expr_aligned,
             true_delta,
             top_idx,
-            eps=float(getattr(args, "acc_eps", 0.0)),
+            eps=float(getattr(args, "acc_eps", EPS_DIR)),
         )
 
         if args.force_nondecreasing_acc and best_acc >= 0 and acc_now < best_acc:
             # Revert full state when this iteration hurts target metric.
             curr_cells = prev_state
             acc_now = best_acc
-            inv_now = 1.0 - best_acc
+            inv_now = best_inv
             # Recompute mean_delta from reverted state for consistent artifacts.
             deltas_batch_revert = []
             for ci, length in enumerate(cell_lengths):
@@ -802,6 +790,7 @@ def run_token_model_dataset(
         else:
             if acc_now > best_acc:
                 best_acc = acc_now
+                best_inv = inv_now
 
         # Optional: save full per-cell token state for visualization.
         if args.save_cell_preds_by_iter:
@@ -817,7 +806,7 @@ def run_token_model_dataset(
         if args.print_every > 0 and ((it + 1) % args.print_every == 0):
             cov = float((example_seq_np[:example_len] != pad_id).mean())
             print(
-                f"    Iter {it+1:>2}/{args.gen_iters} | acc={acc_curve[-1]:.2%} | "
+                f"    Iter {it+1:>2}/{args.gen_iters} | BA={acc_curve[-1]:.2%} | "
                 f"inv={acc_curve_inv_truth[-1]:.2%} | example_nonpad={cov:.2%}"
             )
 
@@ -835,6 +824,7 @@ def run_token_model_dataset(
         mean_pos_before /= float(len(cell_lengths))
 
     diagnostics = {
+        **metric_metadata(float(args.scf_eps_dir) if args.model == "scfoundation" else float(args.acc_eps)),
         "dataset": name,
         "model": args.model,
         "n_genes": n_genes,
@@ -971,19 +961,20 @@ def run_scgpt_dataset(name, cfg, model, vocab, device, args):
                 pred_delta,
                 true_delta,
                 top_idx,
-                eps=float(getattr(args, "acc_eps", 0.0)),
+                eps=float(getattr(args, "acc_eps", EPS_DIR)),
             )
             acc_curve.append(acc_now)
             acc_curve_inv_truth.append(inv_now)
             if args.print_every > 0 and ((it + 1) % args.print_every == 0):
                 print(
-                    f"    Iter {it+1:>2}/{args.gen_iters} | acc={acc_curve[-1]:.2%} | "
+                    f"    Iter {it+1:>2}/{args.gen_iters} | BA={acc_curve[-1]:.2%} | "
                     f"inv={acc_curve_inv_truth[-1]:.2%}"
                 )
 
     matched = sum(1 for g in genes if g in vocab)
     top_matched = sum(1 for i in top_idx if genes[i] in vocab)
     diagnostics = {
+        **metric_metadata(float(args.scf_eps_dir) if args.model == "scfoundation" else float(args.acc_eps)),
         "dataset": name,
         "model": args.model,
         "n_genes": n_genes,
@@ -998,6 +989,7 @@ def run_scgpt_dataset(name, cfg, model, vocab, device, args):
     }
     artifacts = {
         "genes": genes,
+        "is_mapped": is_mapped,
         "true_delta": true_delta.astype(np.float32, copy=False),
         "early_mean": early_mean.astype(np.float32, copy=False),
         "late_mean": late_mean.astype(np.float32, copy=False),
@@ -1298,10 +1290,9 @@ def _scf_iterative_predict_curve(
         pred_mean_eval = vals[:, eval_model_idx].detach().float().mean(dim=0).cpu().numpy()
         pred_delta_eval = pred_mean_eval - early_mean_eval
         pred_delta_eval_per_iter.append(pred_delta_eval.astype(np.float32, copy=False))
-        # 与 scGPT/你的 *_gene_result.csv 一致：delta>0 为 Up，否则为 Down（delta==0 也算 Down，不排除）
-        true_dir = np.where(true_delta_eval > 0, 1, -1)
-        pred_dir = np.where(pred_delta_eval > 0, 1, -1)
-        acc = float((pred_dir == true_dir).mean())
+        acc, _ = direction_accuracy_top_genes(
+            pred_delta_eval, true_delta_eval, np.arange(len(true_delta_eval)), eps=eps_dir
+        )
         acc_curve.append(acc)
 
     if save_full_cells_by_iter:
@@ -1460,9 +1451,11 @@ def run_scfoundation_dataset(name, cfg, model, config, gene2idx_model: Dict[str,
     for it in range(n_it):
         stacks = np.stack([pred_delta_batches[b][it] for b in range(len(pred_delta_batches))], axis=0)
         pred_delta_eval_avg.append(np.average(stacks, axis=0, weights=batch_cell_counts).astype(np.float32))
-    true_dir_eval = np.where(true_delta_eval > 0, 1, -1)
-    acc_curve = [float((np.where(delta > 0, 1, -1) == true_dir_eval).mean())
-                 for delta in pred_delta_eval_avg]
+    eval_local = np.arange(len(true_delta_eval))
+    score_pairs = [direction_accuracy_top_genes(delta, true_delta_eval, eval_local,
+                                               eps=float(args.scf_eps_dir))
+                   for delta in pred_delta_eval_avg]
+    acc_curve = [pair[0] for pair in score_pairs]
 
     pred_delta_by_iter = np.full((n_it, n_genes), np.nan, dtype=np.float32)
     for it in range(n_it):
@@ -1474,17 +1467,11 @@ def run_scfoundation_dataset(name, cfg, model, config, gene2idx_model: Dict[str,
     pred_delta_final_910 = pred_mean_910 - early_mean_910
 
     eps = float(args.scf_eps_dir)
-    true_dir = np.where(true_delta_910 > 0, 1, -1)
-    pred_dir = np.where(pred_delta_final_910 > 0, 1, -1)
-    in_eval = np.zeros(n_genes, dtype=bool)
-    in_eval[eval_910] = True
-    last_pred = pred_delta_eval_avg[-1]
-    last_true_d = np.where(true_delta_eval > 0, 1, -1)
-    last_pred_d = np.where(last_pred > 0, 1, -1)
-    inv_core = float((last_pred_d == (-last_true_d)).mean())
+    inv_core = score_pairs[-1][1]
 
     matched_rate = mapped / max(1, n_genes)
     diagnostics = {
+        **metric_metadata(float(args.scf_eps_dir) if args.model == "scfoundation" else float(args.acc_eps)),
         "dataset": name,
         "model": args.model,
         "n_genes": n_genes,
@@ -1497,7 +1484,7 @@ def run_scfoundation_dataset(name, cfg, model, config, gene2idx_model: Dict[str,
         "eval_percent": args.top_percent,
         "eval_genes_count": int(len(eval_910)),
         "scf_eps_dir": eps,
-        "scf_eval_note": "top_percent of mapped genes; accuracy uses ±eps_dir and excludes true_dir==0",
+        "scf_eval_note": "top_percent of mapped genes; balanced Up/Down recall; near-zero truth excluded, near-zero prediction incorrect",
         "final_acc_inv_truth": inv_core,
     }
     artifacts = {
@@ -1715,6 +1702,8 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
     true_delta = artifacts["true_delta"]
     top_idx = set(int(i) for i in artifacts["top_idx"].tolist())
 
+    eps = float(args.scf_eps_dir) if args.model == "scfoundation" else float(args.acc_eps)
+
     # Final per-gene table
     if "mean_delta_by_iter" in artifacts and artifacts["mean_delta_by_iter"] is not None:
         pred_rank_delta_final = artifacts["mean_delta_by_iter"][-1]
@@ -1729,13 +1718,13 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
                 "true_delta": true_delta,
                 "pred_rank_delta": pred_rank_delta_final,
                 "pred_dir_from_rank": pred_dir_from_rank_final,
-                "true_sign": np.sign(true_delta),
-                "pred_sign": np.sign(pred_dir_from_rank_final),
+                "true_sign": direction_signs(true_delta, eps),
+                "pred_sign": direction_signs(pred_dir_from_rank_final, eps),
             }
         )
         # For unmapped genes (token_id==0), pred_rank_delta is not meaningful.
         df.loc[~df["is_mapped"], ["pred_rank_delta", "pred_dir_from_rank", "pred_sign"]] = np.nan
-        df["correct_sign"] = df["true_sign"].values == df["pred_sign"].values
+        df["correct_sign"] = (df["true_sign"].values != 0) & (df["true_sign"].values == df["pred_sign"].values)
         df["in_top_eval"] = [i in top_idx for i in range(len(genes))]
         df.to_csv(ds_dir / "per_gene_final_changes.csv", index=False)
 
@@ -1751,7 +1740,6 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
             pos_after_mean = pos_before_mean + rank_delta_mean
 
             true_delta_np = true_delta.astype(np.float32, copy=False)
-            eps = 1e-3
             dir_true = np.where(
                 true_delta_np > eps, "Up", np.where(true_delta_np < -eps, "Down", "")
             )
@@ -1806,11 +1794,11 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
         # 用 pred_dir_from_rank_final 作为 delta_pred：其符号直接对应 Up/Down（与 dir_pred 逻辑一致）
         delta_pred = pred_dir_from_rank_final.astype(np.float32, copy=False)
 
-        dir_true = np.where(delta_true > 1e-3, "Up", np.where(delta_true < -1e-3, "Down", ""))
+        dir_true = np.where(delta_true > eps, "Up", np.where(delta_true < -eps, "Down", ""))
         dir_pred = np.where(
-            pred_dir_from_rank_final > 1e-3,
+            pred_dir_from_rank_final > eps,
             "Up",
-            np.where(pred_dir_from_rank_final < -1e-3, "Down", ""),
+            np.where(pred_dir_from_rank_final < -eps, "Down", ""),
         )
         dir_correct = np.where(
             (dir_true != "") & (dir_pred != ""),
@@ -1885,14 +1873,16 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
                 "gene": genes,
                 "true_delta": true_delta,
                 "pred_delta": pred_delta_final,
-                "true_sign": np.sign(true_delta),
-                "pred_sign": np.sign(pred_delta_final),
+                "true_sign": direction_signs(true_delta, eps),
+                "pred_sign": direction_signs(pred_delta_final, eps),
             }
         )
         # scFoundation / NaN unmapped: skip sign compare where pred is missing
-        ok = ~np.isnan(pred_delta_final)
+        ok = direction_signs(true_delta, eps) != 0
         df["correct_sign"] = np.where(ok, df["true_sign"].values == df["pred_sign"].values, np.nan)
         df["in_top_eval"] = [i in top_idx for i in range(len(genes))]
+        if "is_mapped" in artifacts:
+            df["is_mapped"] = artifacts["is_mapped"]
         if "map_idx" in artifacts:
             df["model_index"] = artifacts["map_idx"]
             df["mapped"] = artifacts["map_idx"] >= 0
@@ -1906,7 +1896,6 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
             delta_true = true_late_mean - true_early_mean
             delta_pred = pred_delta_final
             pred_late_like_mean = true_early_mean + delta_pred
-            eps = 1e-3
             dir_true = np.where(delta_true > eps, "Up", np.where(delta_true < -eps, "Down", ""))
 
             pred_nan = np.isnan(delta_pred)
@@ -1924,6 +1913,8 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
             gene_result_df = pd.DataFrame(
                 {
                     "gene": genes,
+                    "is_mapped": (artifacts["map_idx"] >= 0) if "map_idx" in artifacts else artifacts["is_mapped"],
+                    "in_eval": [1 if i in top_idx else 0 for i in range(len(genes))],
                     "true_early_mean": true_early_mean,
                     "true_late_mean": true_late_mean,
                     "pred_late_like_mean": pred_late_like_mean,
@@ -1943,6 +1934,11 @@ def save_dataset_artifacts(outdir: Path, name: str, args, diag: dict, artifacts:
 
 
 def load_scgpt_model(args, device):
+    helper_dir = str(Path(__file__).resolve().parent)
+    if helper_dir not in sys.path:
+        sys.path.insert(0, helper_dir)
+    from scgpt_checkpoint import load_scgpt_dynamics_checkpoint
+
     if args.scgpt_repo_dir not in sys.path:
         sys.path.insert(0, args.scgpt_repo_dir)
     from scgpt.model import TransformerModel
@@ -1967,7 +1963,9 @@ def load_scgpt_model(args, device):
         use_fast_transformer=cfg.get("fast_transformer", True),
     )
     ckpt = torch.load(Path(args.scgpt_model_dir) / "best_model.pt", map_location="cpu")
-    model.load_state_dict(ckpt, strict=False)
+    model.checkpoint_load_report = load_scgpt_dynamics_checkpoint(
+        model, ckpt, checkpoint_path=Path(args.scgpt_model_dir) / "best_model.pt"
+    )
     model = model.to(device).eval()
     if device.type == "cuda":
         model.half()
@@ -1992,6 +1990,8 @@ def main():
     errors = {}
 
     if args.model == "geneformer":
+        from transformers import BertForMaskedLM
+
         model = BertForMaskedLM.from_pretrained(args.geneformer_model_dir).to(device).eval()
         vocab, gene_name_id, pad_id, mask_id = load_geneformer_dicts(Path(args.geneformer_dicts_dir))
         runner = lambda n, c: run_token_model_dataset(n, c, model, vocab, gene_name_id, pad_id, mask_id, device, args, True)
@@ -2076,15 +2076,15 @@ def main():
             save_dataset_artifacts(outdir, name, args, diag, artifacts)
             inv = diag.get("final_acc_inv_truth", None)
             if inv is not None:
-                print(f"  Final accuracy: {acc_curve[-1]:.2%} | inv-truth: {inv:.2%}")
+                print(f"  Final balanced accuracy: {acc_curve[-1]:.2%} | inverted-truth BA: {inv:.2%}")
             else:
-                print(f"  Final accuracy: {acc_curve[-1]:.2%}")
+                print(f"  Final balanced accuracy: {acc_curve[-1]:.2%}")
         except Exception as e:
             errors[name] = str(e)
             print(f"  [ERROR] {name}: {e}")
 
-    with open(outdir / "accuracy_curves.json", "w") as f:
-        json.dump(all_curves, f, indent=2)
+    save_accuracy_curves(outdir, all_curves,
+                         float(args.scf_eps_dir) if args.model == "scfoundation" else float(args.acc_eps))
     with open(outdir / "diagnostics.json", "w") as f:
         json.dump(all_diag, f, indent=2)
     with open(outdir / "errors.json", "w") as f:
@@ -2094,7 +2094,7 @@ def main():
     print(f"SUMMARY | model={args.model} | outdir={outdir}")
     print("=" * 70)
     for name, acc in all_curves.items():
-        print(f"{name:<12} | Accuracy: {acc[-1]:.2%}")
+        print(f"{name:<12} | Balanced accuracy: {acc[-1]:.2%}")
     if errors:
         print("-" * 70)
         print("FAILED DATASETS")
