@@ -9,6 +9,12 @@ Xavier/Glorot-random scGPT builder used by the Fig. 6a seeded control.
 Only model construction lives here. Evaluation parameters come from
 ``run_scgpt_gene_results.py`` via ``run_random_scgpt_seeded.py``.
 
+Linear and embedding weights use Xavier normal initialization. LayerNorm scales
+and biases are initialized to one and zero. Native MultiheadAttention packed
+QKV weights (or separate Q/K/V weights) are explicitly reinitialized, rather
+than retaining the constructor's initialization. Pretrained loading uses the
+same fail-closed checkpoint validation as the formal dynamic evaluator.
+
 ## Dependencies
 
 Imports found in the source (standard library and external modules): `__future__`, `json`, `os`, `pathlib`, `scgpt`, `sys`, `torch`, `warnings`.

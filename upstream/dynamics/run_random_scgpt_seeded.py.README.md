@@ -24,10 +24,28 @@ Imports found in the source (standard library and external modules): `argparse`,
 
 - `--seeds`
 - `--outdir`
+- `--pretrained-outdir`: run one pretrained condition using the same evaluator.
 
 ## Invocation
 
 Run `python upstream/dynamics/run_random_scgpt_seeded.py` from the repository root after supplying the external inputs and configuring paths. Review argument defaults before running.
+
+To reproduce both conditions in fresh directories:
+
+```bash
+python upstream/dynamics/run_random_scgpt_seeded.py \
+  --outdir outputs/fig06a_native_binning_ema09_20261008/random \
+  --pretrained-outdir outputs/fig06a_native_binning_ema09_20261008/pretrained
+```
+
+The evaluator uses native per-cell scGPT binning, no log1p, EMA retention 0.9,
+16 iterations, and mapped top-30% gene balanced accuracy with EPS_DIR=0.001.
+Seeds 1–10 vary model initialization. Each dataset resets its preprocessing seed
+to 20261008 plus its dataset index, so tied-quantile binning and observed
+early/late changes are identical across all conditions. Pretrained loading
+requires all weights used by the dynamic probe. Every result records input,
+checkpoint, vocabulary, source and protocol hashes. Existing results are reused
+only when this full protocol and all CSV hashes match; legacy results are rejected.
 
 ## Referenced paths and file names
 

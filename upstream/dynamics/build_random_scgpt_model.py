@@ -28,7 +28,19 @@ def init_weights_xavier_normal(model):
     """Initialize model weights with Xavier/Glorot normal distribution."""
 
     def _init_fn(m):
-        if isinstance(m, nn.Linear):
+        if isinstance(m, nn.MultiheadAttention):
+            # Packed QKV parameters are not child Linear modules.
+            if m.in_proj_weight is not None:
+                nn.init.xavier_normal_(m.in_proj_weight, gain=1.0)
+            else:
+                for weight in (m.q_proj_weight, m.k_proj_weight, m.v_proj_weight):
+                    nn.init.xavier_normal_(weight, gain=1.0)
+            if m.in_proj_bias is not None:
+                nn.init.zeros_(m.in_proj_bias)
+            for bias in (m.bias_k, m.bias_v):
+                if bias is not None:
+                    nn.init.zeros_(bias)
+        elif isinstance(m, nn.Linear):
             nn.init.xavier_normal_(m.weight, gain=1.0)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
@@ -72,8 +84,10 @@ def build_model(model_dir, device, use_pretrained=True):
     )
 
     if use_pretrained:
+        from scgpt_checkpoint import load_scgpt_dynamics_checkpoint
         ckpt = torch.load(Path(model_dir) / "best_model.pt", map_location="cpu")
-        model.load_state_dict(ckpt, strict=False)
+        model.checkpoint_load_report = load_scgpt_dynamics_checkpoint(
+            model, ckpt, checkpoint_path=Path(model_dir) / "best_model.pt")
         print("  [INFO] Loaded pretrained weights")
     else:
         print("  [INFO] Using Xavier/Glorot normal initialization (random weights)")

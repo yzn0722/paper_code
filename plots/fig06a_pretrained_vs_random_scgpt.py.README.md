@@ -23,6 +23,11 @@ with `--random-results-dir`, `--weight-results-dir`, `--vocab-path`, and
 The run also writes matching SVG, PNG, TIFF, caption, and a summary CSV with
 per-seed values and per-dataset mean, sample s.d., and pretrained comparison.
 
+Both conditions must have an identical recorded native-binning/EMA-0.9 protocol.
+The script verifies exact equality of observed early/late means, delta_true,
+gene mapping and in_eval across all 50 random CSVs and the pretrained condition.
+It rejects legacy predictions even if their scores can be recalculated.
+
 ## Dependencies
 
 Imports found in the source (standard library and external modules): `argparse`, `hashlib`, `json`, `matplotlib`, `numpy`, `os`, `pandas`, `pathlib`, `warnings`.
@@ -39,8 +44,8 @@ Run `python plots/fig06a_pretrained_vs_random_scgpt.py` after supplying the exte
 
 These literals may designate inputs, outputs, or templates. Consult their surrounding source code for their role; these files are not included.
 
-- `/mnt/10T/yzn/scGRN-Bench/FBplot/fig5/results_multidataset_pseudotime_227_random_seeded_20260929/seed_XX/{dataset}_gene_result.csv`
-- `/mnt/10T/yzn/benchmark_GRN/pre_scgpt/results_multidataset_pseudotime_227/{dataset}_gene_result.csv`
+- `/mnt/10T/yzn/paper-code/outputs/fig06a_native_binning_ema09_20261008/random/seed_XX/{dataset}_gene_result.csv`
+- `/mnt/10T/yzn/paper-code/outputs/fig06a_native_binning_ema09_20261008/pretrained/{dataset}_gene_result.csv`
 - `top30_balanced_accuracy_seeded10_mapped_top30.pdf` and matching `.svg`, `.png`, `.tiff`, `_caption.txt`, and `_summary.csv`
 
 ## Data and runtime requirements

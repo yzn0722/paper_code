@@ -25,11 +25,10 @@ plt.rcParams.update({"pdf.fonttype": 42, "svg.fonttype": "none"})
 # Match the 8 x 6 inch plotting canvas used by weight.py.
 FIGURE_SIZE_IN = (8, 6)
 DEFAULT_RANDOM_RESULTS_DIR = Path(
-    "/mnt/10T/yzn/scGRN-Bench/FBplot/fig5/"
-    "results_multidataset_pseudotime_227_random_seeded_20260929"
+    "/mnt/10T/yzn/paper-code/outputs/fig06a_native_binning_ema09_20261008/random"
 )
 DEFAULT_WEIGHT_RESULTS_DIR = Path(
-    "/mnt/10T/yzn/benchmark_GRN/pre_scgpt/results_multidataset_pseudotime_227"
+    "/mnt/10T/yzn/paper-code/outputs/fig06a_native_binning_ema09_20261008/pretrained"
 )
 DEFAULT_OUTPUT_PDF = Path(__file__).resolve().with_name(
     "top30_balanced_accuracy_seeded10_mapped_top30.pdf"
@@ -109,6 +108,34 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def validate_matched_conditions(random_dir, pretrained_dir, datasets, result_files):
+    """Require the same recorded protocol, observed deltas and scoring gene set."""
+    random_manifest = json.loads((random_dir / "experiment_manifest.json").read_text(encoding="utf-8"))
+    pretrained_manifest = json.loads((pretrained_dir / "seed_manifest.json").read_text(encoding="utf-8"))
+    protocol = random_manifest.get("protocol")
+    if not protocol or protocol != pretrained_manifest.get("protocol"):
+        raise ValueError("Pretrained and random results lack an identical recorded protocol; rerun both")
+    if protocol.get("ema_alpha") != .9 or protocol.get("input_processing") != "scgpt.preprocess.binning per cell on mapped genes":
+        raise ValueError("Fig. 6a requires native per-cell binning and EMA retention 0.9")
+    required = ["gene", "gene_used", "is_mapped", "in_eval", "true_early_mean", "true_late_mean", "delta_true"]
+    for dataset in datasets:
+        path = pretrained_dir / f"{dataset}_gene_result.csv"
+        expected = pretrained_manifest.get("metrics", {}).get(dataset, {}).get("csv_sha256")
+        if not expected or _sha256_file(path) != expected:
+            raise ValueError(f"Pretrained result hash mismatch: {path}")
+        observed = pd.read_csv(path)[required]
+        for random_path in result_files[dataset]:
+            seed_manifest = json.loads((random_path.parent / "seed_manifest.json").read_text(encoding="utf-8"))
+            if seed_manifest.get("protocol") != protocol:
+                raise ValueError(f"Seed protocol differs: {random_path}")
+            try:
+                pd.testing.assert_frame_equal(observed, pd.read_csv(random_path)[required],
+                                              check_exact=True)
+            except AssertionError as exc:
+                raise ValueError(f"Observed input or evaluation genes differ: {random_path}") from exc
+    print("[OK] All 50 random results match pretrained observed inputs and evaluation genes exactly")
+
+
 def validate_random_results(results_dir, datasets):
     """Require the recorded ten-seed experiment and verify each result CSV."""
     manifest_path = results_dir / "experiment_manifest.json"
@@ -134,6 +161,8 @@ def validate_random_results(results_dir, datasets):
         seed_manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
         if seed_manifest.get("seed") != seed:
             raise ValueError(f"Unexpected seed in {seed_manifest_path}")
+        if seed_manifest.get("model_sha256") != completed[str(seed)]:
+            raise ValueError(f"Model hash differs between manifests: {seed_manifest_path}")
         for dataset in datasets:
             csv_path = seed_dir / f"{dataset}_gene_result.csv"
             if not csv_path.is_file():
@@ -356,6 +385,7 @@ def main():
     # 数据集列表
     datasets = ['hESC', 'hHep', 'mHSC-E', 'mHSC-GM', 'mHSC-L']
     _, result_files, manifest_scores = validate_random_results(args.random_results_dir, datasets)
+    validate_matched_conditions(args.random_results_dir, args.weight_results_dir, datasets, result_files)
     vocab_tokens = load_vocab_tokens(args.vocab_path)
     weight_pattern = str(args.weight_results_dir / "{dataset}_gene_result.csv")
     
@@ -437,6 +467,9 @@ def main():
         "Balanced accuracy was recalculated on the top 30% of vocabulary-mapped genes "
         "ranked by absolute true change using the evaluator's EPS_DIR=0.001 policy; "
         "near-zero true directions were excluded and near-zero predictions counted as incorrect."
+        " Both conditions used the same native per-cell quantile-binned inputs, "
+        "fixed dataset-specific preprocessing seeds, no log1p, and 16 EMA updates "
+        "with 0.9 retention of the previous state."
     )
     caption_path = str(output_stem) + '_caption.txt'
     with open(caption_path, 'w', encoding='utf-8') as handle:
