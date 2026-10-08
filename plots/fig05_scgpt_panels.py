@@ -20,9 +20,12 @@ from scipy.stats import pearsonr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'upstream/dynamics'))
 from direction_metrics import EPS_DIR, direction_scores
-from fig4_palette import model_color
+from fig4_palette import apply_fig4_style, model_color
 
 ORDER = ['Geneformer', 'LangCell', 'scGPT', 'scFoundation', 'scPRINT', 'scCello']
+# Fixed exported geometry and typography shared by the manuscript panels.
+PAGE_SIZE_PT = (344.80938720703125, 326.2515563964844)
+AXES_BOUNDS_PT = (53.303125, 40.13125, 279.0, 277.2)
 STARTS = {'early': ('Early start', '#2E6F9E'),
           'middle': ('Intermediate start', '#D98B2B'),
           'late': ('Late start', '#3E9B76')}
@@ -57,9 +60,12 @@ def load_pretrained(folder, dataset):
 
 
 def new_axes(ylabel):
-    # Same physical axes footprint for the three standalone manuscript panels.
-    fig = plt.figure(figsize=(5, 5))
-    ax = fig.add_axes([.18, .17, .78, .77])
+    # Preserve the legacy exported page and plot area, without variable cropping.
+    width, height = PAGE_SIZE_PT
+    left, bottom, axes_width, axes_height = AXES_BOUNDS_PT
+    fig = plt.figure(figsize=(width / 72, height / 72))
+    ax = fig.add_axes([left / width, bottom / height,
+                      axes_width / width, axes_height / height])
     ax.set_xlabel('Iteration')
     ax.set_ylabel(ylabel)
     ax.spines[['top', 'right']].set_visible(False)
@@ -68,6 +74,12 @@ def new_axes(ylabel):
 
 def export(fig, outdir, name):
     # Editable vector text; PNG is a high-resolution inspection preview.
+    fig.canvas.draw()
+    scale = 72 / fig.dpi
+    layout = {'page_size_pt': (fig.get_size_inches() * 72).tolist(),
+              'axes_bounds_pt': [[v * scale for v in ax.get_window_extent().bounds]
+                                 for ax in fig.axes]}
+    (outdir / f'{name}.layout.json').write_text(json.dumps(layout, indent=2) + '\n')
     fig.savefig(outdir / f'{name}.pdf', dpi=600)
     fig.savefig(outdir / f'{name}.svg', dpi=600)
     fig.savefig(outdir / f'{name}.png', dpi=600)
@@ -87,16 +99,17 @@ def panel_c(args, manifest):
         y = np.asarray(curves[name][args.dataset], float)[:args.c_iterations]
         if len(y) != args.c_iterations or not np.isfinite(y).all() or ((y < 0) | (y > 1)).any():
             raise ValueError(f'Invalid convergence curve: {name}')
-        ax.plot(np.arange(1, len(y)+1), y*100, marker='o', lw=2.4, ms=7,
+        ax.plot(np.arange(1, len(y)+1), y*100, marker='o', lw=2.4, ms=8,
                 alpha=.85, color=model_color(name), label=name)
         rows += [{'model': name, 'iteration': i+1, 'balanced_accuracy': float(value),
                   'source': 'current pretrained manifest' if name == 'scGPT' else 'preserved previous curve'} for i, value in enumerate(y)]
     ax.set(xlim=(.8, args.c_iterations+.2), ylim=(0, 100))
     ax.set_xticks(np.arange(1, args.c_iterations+1, 2))
     ax.set_yticks(np.arange(0, 101, 20))
-    ax.axhline(50, color='gray', ls='--', lw=1.2, zorder=0)
-    ax.legend(loc='lower right', frameon=False, ncol=2, fontsize=11,
-              handlelength=1.3, handletextpad=.5, columnspacing=.8)
+    ax.axhline(50, color='gray', ls='--', lw=1.2, alpha=.8, zorder=0)
+    ax.legend(loc='lower right', frameon=False, ncol=2, fontsize=14,
+              handlelength=1.6, handletextpad=.5, labelspacing=.3,
+              borderaxespad=.3, columnspacing=.8)
     export(fig, args.outdir, 'fig05c_convergence_mHSC-L')
     pd.DataFrame(rows).to_csv(args.outdir/'fig05c_source_data.csv', index=False)
     (args.outdir/'updated_curves_all_models.json').write_text(json.dumps(curves, indent=2)+'\n')
@@ -109,6 +122,10 @@ def panel_d(args, manifest, frame):
     report = json.loads((args.trajectory_dir/'initial_state_manifest.json').read_text())
     if report['dataset'] != args.dataset or report['protocol'] != manifest['protocol'] or report['reference_csv_sha256'] != manifest['metrics'][args.dataset]['csv_sha256']:
         raise ValueError('Initial-state run and Fig. 6a reference have different protocols')
+    validate_full_group_early_curve(report, manifest, args.dataset)
+    shown_iterations = min(args.c_iterations, report['iterations'])
+    if shown_iterations < 1:
+        raise ValueError('At least one iteration must be displayed')
     with np.load(args.trajectory_dir/'reference.npz', allow_pickle=False) as ref:
         truth, top, genes = ref['true_delta'], ref['top_idx'], ref['genes']
     if not np.array_equal(genes.astype(str), frame.gene.astype(str)) or not np.allclose(truth, frame.delta_true, atol=1e-6, rtol=0) or set(top) != set(np.flatnonzero(frame.in_eval.to_numpy()==1)):
@@ -120,26 +137,44 @@ def panel_d(args, manifest, frame):
         if states.shape != (report['iterations']+1, len(truth)) or not np.isfinite(states).all():
             raise ValueError(f'Invalid trajectory: {key}')
         y = []
-        for i in range(1, len(states)):
+        for i in range(1, shown_iterations + 1):
             ba = direction_scores(states[i]-states[0], truth, top, EPS_DIR)['balanced_accuracy']
             step_ba = direction_scores(states[i]-states[i-1], truth, top, EPS_DIR)['balanced_accuracy']
             y.append(ba)
             rows.append({'start': label, 'iteration': i, 'balanced_accuracy': ba,
                          'stepwise_balanced_accuracy': step_ba, 'n_cells': len(report['selected_cells'][key]),
                          'n_top_genes': len(top)})
-        if not np.allclose(y, report['balanced_accuracy_curves'][key], atol=1e-12, rtol=0):
+        if not np.allclose(y, report['balanced_accuracy_curves'][key][:shown_iterations], atol=1e-12, rtol=0):
             raise ValueError(f'Saved trajectory cannot reproduce evaluator BA: {key}')
         curves[key] = y
-        ax.plot(np.arange(1, len(y)+1), np.asarray(y)*100, marker='o', lw=2.4, ms=7, color=color, label=label)
-    ax.set(xlim=(.8, report['iterations']+.2), ylim=(0, 100))
-    ax.set_xticks(np.arange(1, report['iterations']+1, 2))
+        ax.plot(np.arange(1, len(y)+1), np.asarray(y)*100, marker='o',
+                lw=2.4, ms=8, markeredgewidth=0, alpha=.85, color=color, label=label)
+    ax.set(xlim=(.8, shown_iterations+.2), ylim=(0, 100))
+    ax.set_xticks(np.arange(1, shown_iterations+1, 2))
     ax.set_yticks(np.arange(0, 101, 20))
-    ax.axhline(50, color='gray', ls='--', lw=1.2, zorder=0)
-    ax.legend(loc='lower right', frameon=False, fontsize=12)
+    ax.axhline(50, color='gray', ls='--', lw=1.2, alpha=.8, zorder=0)
+    ax.legend(loc='lower right', frameon=False, fontsize=14,
+              handlelength=1.6, handletextpad=.5, labelspacing=.3,
+              borderaxespad=.3, columnspacing=.8)
     export(fig, args.outdir, 'fig05d_initial_state_mHSC-L')
     pd.DataFrame(rows).to_csv(args.outdir/'fig05d_source_data.csv', index=False)
-    return {'curves': curves, 'n_top_genes': len(top), 'selected_cells': report['selected_cells'],
+    return {'curves': curves, 'shown_iterations': shown_iterations,
+            'early_matches_fig05c_scgpt': True,
+            'n_top_genes': len(top), 'selected_cells': report['selected_cells'],
             'definition': report['definition']}
+
+
+def validate_full_group_early_curve(report, manifest, dataset):
+    """Reject sampled or inconsistent d inputs rather than copying a c curve."""
+    for key in STARTS:
+        cells = report['selected_cells'][key]
+        if len(set(cells)) != len(cells) or len(cells) != report['group_available_sizes'][key]:
+            raise ValueError(f'Panel d requires every cell in the {key} group; sampled runs are incompatible with c')
+    n = report['iterations']
+    actual = np.asarray(report['balanced_accuracy_curves']['early'], dtype=float)
+    expected = np.asarray(manifest['metrics'][dataset]['accuracy_curve'], dtype=float)[:n]
+    if len(actual) != n or not np.array_equal(actual, expected):
+        raise ValueError('Panel d Early curve must match formal Fig. 5c/scGPT exactly')
 
 
 def panel_e(args, manifest, frame):
@@ -161,15 +196,17 @@ def panel_e(args, manifest, frame):
                                 (inconsistent, 'Inconsistent', model_color('scPrint')),
                                 (neutral, 'Near-zero observed', '#9C9C9C')]:
         if mask.any():
-            ax.scatter(x[mask], y[mask], s=18, color=color, alpha=.75, edgecolors='none', label=label, zorder=2)
+            ax.scatter(x[mask], y[mask], s=60, color=color, alpha=.75,
+                       edgecolors='none', linewidths=0, label=label, zorder=2)
     fit = np.polyfit(x, y, 1)
     grid = np.linspace(x.min(), x.max(), 100)
-    ax.plot(grid, fit[0]*grid+fit[1], color='black', lw=1.3, zorder=1)
-    ax.axhline(0, color='gray', ls=':', lw=1, zorder=0)
-    ax.axvline(0, color='gray', ls=':', lw=1, zorder=0)
+    ax.plot(grid, fit[0]*grid+fit[1], color='black', lw=1.2, alpha=.7, zorder=1)
+    ax.axhline(0, color='gray', ls=':', lw=.8, alpha=.7, zorder=0)
+    ax.axvline(0, color='gray', ls=':', lw=.8, alpha=.7, zorder=0)
     ax.margins(x=.08, y=.12)
-    ax.text(.97, .97, f'r = {r:.3f}', transform=ax.transAxes, ha='right', va='top', fontsize=14)
-    ax.legend(loc='lower right', frameon=False, fontsize=11)
+    ax.text(.95, .95, f'r = {r:.3f}', transform=ax.transAxes, ha='right', va='top', fontsize=14)
+    ax.legend(loc='lower right', frameon=False, fontsize=14,
+              handletextpad=.4, borderpad=.2, labelspacing=.3)
     export(fig, args.outdir, 'fig05e_gene_change_mHSC-L')
     source = frame.loc[mapped].copy()
     source['display_direction_class'] = np.where(neutral, 'Near-zero observed', np.where(consistent, 'Consistent', 'Inconsistent'))
@@ -198,12 +235,19 @@ def main(panel=None):
     if args.panel in ('d', 'all') and args.trajectory_dir is None:
         parser.error('--trajectory-dir is required for panel d')
     args.outdir.mkdir(parents=True, exist_ok=True)
-    plt.rcParams.update({'font.family': 'sans-serif', 'font.sans-serif': ['Arial', 'DejaVu Sans'], 'font.size': 14,
-                         'axes.labelsize': 14, 'xtick.labelsize': 12, 'ytick.labelsize': 12,
-                         'axes.linewidth': 1.2, 'pdf.fonttype': 42, 'ps.fonttype': 42,
-                         'svg.fonttype': 'none', 'xtick.major.size': 0, 'ytick.major.size': 0})
+    apply_fig4_style()
+    plt.rcParams.update({'font.family': 'sans-serif', 'font.sans-serif': ['DejaVu Sans'],
+                         'pdf.fonttype': 42, 'ps.fonttype': 42,
+                         'svg.fonttype': 'none', 'savefig.bbox': None,
+                         'figure.facecolor': 'white', 'axes.facecolor': 'white',
+                         'savefig.facecolor': 'white', 'savefig.edgecolor': 'white'})
     manifest, frame = load_pretrained(args.pretrained_dir, args.dataset)
-    stats = {'dataset': args.dataset, 'protocol': manifest['protocol'], 'pretrained_model_sha256': manifest['model_sha256']}
+    stats = {'dataset': args.dataset, 'protocol': manifest['protocol'],
+             'pretrained_model_sha256': manifest['model_sha256'],
+             'display_style': {'page_size_pt': PAGE_SIZE_PT, 'axes_bounds_pt': AXES_BOUNDS_PT,
+                               'font_family': plt.rcParams['font.family'],
+                               'axis_label_pt': 16, 'tick_label_pt': 14, 'legend_pt': 14,
+                               'axis_linewidth_pt': 1.2, 'preview_dpi': 600}}
     if args.panel in ('c', 'all'):
         stats['c'] = panel_c(args, manifest)
     if args.panel in ('d', 'all'):

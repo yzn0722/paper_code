@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+import io
 
 import numpy as np
 import pandas as pd
@@ -12,7 +15,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'plots'))
-from fig05_scgpt_panels import load_pretrained
+from fig05_scgpt_panels import load_pretrained, validate_full_group_early_curve
 from test_pseudotime_validation import load_runner
 
 
@@ -83,6 +86,73 @@ class FigureProtocolTests(unittest.TestCase):
             (folder/'seed_manifest.json').write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError,'evaluation set'):
                 load_pretrained(folder,'mHSC-L')
+
+    def test_sampled_initial_state_run_is_rejected(self):
+        report = {'iterations': 2, 'selected_cells': {'early': ['e1'], 'middle': ['m1'], 'late': ['l1']},
+                  'group_available_sizes': {'early': 2, 'middle': 1, 'late': 1},
+                  'balanced_accuracy_curves': {'early': [.5, .75]}}
+        manifest = {'metrics': {'mHSC-L': {'accuracy_curve': [.5, .75]}}}
+        with self.assertRaisesRegex(ValueError, 'every cell'):
+            validate_full_group_early_curve(report, manifest, 'mHSC-L')
+
+    def test_different_early_curve_is_rejected(self):
+        report = {'iterations': 2, 'selected_cells': {'early': ['e1'], 'middle': ['m1'], 'late': ['l1']},
+                  'group_available_sizes': {'early': 1, 'middle': 1, 'late': 1},
+                  'balanced_accuracy_curves': {'early': [.5, .70]}}
+        manifest = {'metrics': {'mHSC-L': {'accuracy_curve': [.5, .75]}}}
+        with self.assertRaisesRegex(ValueError, 'match formal'):
+            validate_full_group_early_curve(report, manifest, 'mHSC-L')
+
+    def test_initial_state_runner_uses_full_groups_and_reproduces_formal_run(self):
+        import run_scgpt_initial_state as runner
+        evaluator = load_runner('run_scgpt_gene_results.py')
+        evaluator.GEN_ITERS = 3
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            modeldir=root/'model'; modeldir.mkdir()
+            (modeldir/'args.json').write_text('{"n_bins":51}')
+            vocab={'<pad>':0, '<cls>':1, 'A':2, 'B':3}
+            (modeldir/'vocab.json').write_text(json.dumps(vocab))
+            (modeldir/'best_model.pt').write_bytes(b'explicit-fixture-checkpoint')
+            cells=[f'cell{i}' for i in range(100)]
+            expr=pd.DataFrame([np.linspace(1,40,100), np.linspace(40,1,100), np.full(100,999.)],
+                              index=['A','B','OOV'],columns=cells)
+            expr.to_csv(root/'expr.csv')
+            pd.DataFrame({'cell':cells,'pt':np.arange(100)}).to_csv(root/'pt.csv',index=False)
+            cfg={'expr_csv':str(root/'expr.csv'),'pt_csv':str(root/'pt.csv')}
+            evaluator.MODEL_DIR=str(modeldir)
+            evaluator.DATASETS={'mHSC-L':cfg}
+            pretrained=root/'pretrained'; pretrained.mkdir()
+            model=OffsetModel(); model.checkpoint_load_report={'fixture':True}
+            with redirect_stdout(io.StringIO()):
+                curve,_=evaluator.run_dataset('mHSC-L',cfg,model,vocab,torch.device('cpu'),pretrained)
+            protocol={'input_processing':'scgpt.preprocess.binning per cell on mapped genes',
+                      'ema_alpha':.9,'eps_dir':.001,'pt_quantile':.2,'top_percent':30,
+                      'no_log1p':True,'gen_iters':3,'batch_size':16,
+                      'preprocessing_seed_by_dataset':{'mHSC-L':11},
+                      'input_sha256':{'mHSC-L':{k:runner.sha256(v) for k,v in cfg.items()}},
+                      'checkpoint_sha256':runner.sha256(modeldir/'best_model.pt'),
+                      'args_sha256':runner.sha256(modeldir/'args.json'),
+                      'vocab_sha256':runner.sha256(modeldir/'vocab.json')}
+            manifest={'condition':'pretrained','protocol':protocol,'metrics':{
+                'mHSC-L':{'csv_sha256':runner.sha256(pretrained/'mHSC-L_gene_result.csv'), 'accuracy_curve':curve}}}
+            (pretrained/'seed_manifest.json').write_text(json.dumps(manifest))
+            out=root/'new_states'
+            with patch.dict(sys.modules, {'run_scgpt_gene_results':evaluator}), \
+                 patch.object(evaluator,'build_model',return_value=(model,vocab)), \
+                 patch.object(torch.cuda,'is_available',return_value=False), \
+                 patch.object(sys,'argv',['runner','--pretrained-dir',str(pretrained),'--outdir',str(out)]), \
+                 redirect_stdout(io.StringIO()):
+                runner.main()
+            report=json.loads((out/'initial_state_manifest.json').read_text())
+            self.assertEqual({k:len(v) for k,v in report['selected_cells'].items()},
+                             {'early':20,'middle':60,'late':20})
+            self.assertEqual(report['selected_cells']['early'], cells[:20])
+            self.assertEqual(report['balanced_accuracy_curves']['early'], curve)
+            self.assertEqual(report['iterations'], 3)
+            validate_full_group_early_curve(report,manifest,'mHSC-L')
+            with np.load(out/'reference.npz',allow_pickle=False) as ref:
+                self.assertEqual(ref['genes'].tolist(), ['A','B','OOV'])
 
 
 if __name__=='__main__':

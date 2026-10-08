@@ -1,0 +1,5 @@
+# CPU regression-test environment; not a pretrained-model environment.
+-r requirements.txt
+torch==2.7.1
+transformers==4.44.2
+safetensors==0.4.5

@@ -1,0 +1,16 @@
+# General evaluation, plotting and built-in expression/PIDC utilities.
+# Installation target: Python 3.10. Model runtimes are installed separately.
+# These direct-dependency pins are not a complete transitive lock file.
+numpy==1.25.2
+pandas==2.2.3
+scipy==1.11.3
+scikit-learn==1.6.1
+matplotlib==3.7.2
+seaborn==0.13.2
+networkx==3.4.2
+python-louvain==0.16
+matplotlib-venn==1.1.2
+openpyxl==3.1.2
+tqdm==4.66.5
+PyYAML==6.0.2
+numba==0.59.1

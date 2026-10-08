@@ -2,8 +2,9 @@
 """Recompute three Fig. 5d starts with the validated formal scGPT protocol.
 
 Requires the manifest and pretrained CSV from the fresh Fig. 6a experiment.
-Only cell selection differs among starts; the binned reference and top genes
-are shared. This writes results to a new directory and does not update figures.
+Uses all cells in each start group. The early trajectory must reproduce the
+formal pretrained run exactly; the binned reference and top genes are shared.
+This writes results to a new directory and does not update figures.
 """
 import argparse
 import hashlib
@@ -25,14 +26,15 @@ def main():
     parser.add_argument('--pretrained-dir', type=Path, required=True)
     parser.add_argument('--outdir', type=Path, required=True)
     parser.add_argument('--dataset', default='mHSC-L')
-    parser.add_argument('--iterations', type=int, default=8)
-    parser.add_argument('--max-cells', type=int, default=16)
-    parser.add_argument('--selection-seed', type=int, default=0)
+    parser.add_argument('--iterations', type=int,
+                        help='Defaults to the full iteration count in the pretrained manifest')
     args = parser.parse_args()
-    if args.iterations < 1 or args.max_cells < 1:
-        parser.error('iterations and max-cells must be positive')
     manifest = json.loads((args.pretrained_dir / 'seed_manifest.json').read_text())
     protocol = manifest['protocol']
+    if args.iterations is None:
+        args.iterations = int(protocol['gen_iters'])
+    if not 1 <= args.iterations <= int(protocol['gen_iters']):
+        parser.error('iterations must be within the recorded pretrained run')
     if manifest.get('condition') != 'pretrained' or (
         protocol['input_processing'], protocol['ema_alpha'], protocol['eps_dir'],
         protocol['pt_quantile'], protocol['top_percent'], protocol['no_log1p']
@@ -91,27 +93,35 @@ def main():
     pad = ids.eq(vocab['<pad>']).expand(len(pt), -1)
     update = np.r_[False, np.ones(len(genes), dtype=bool)]
     evaluator.GEN_ITERS = args.iterations
-    rng = np.random.default_rng(args.selection_seed)
     selected, curves = {}, {}
     for name, mask in groups.items():
         idx = np.flatnonzero(mask)
         if not len(idx):
             raise ValueError(f'Empty starting group: {name}')
-        if len(idx) > args.max_cells:
-            idx = np.sort(rng.choice(idx, size=args.max_cells, replace=False))
         selected[name] = expr.columns[idx].astype(str).tolist()
         initial = x[idx].mean(0)
         states = [initial.copy()]
         curve, final = evaluator.iterative_direction_accuracy(
             model, ids, values[idx], pad[idx], update, initial, truth, top,
             trajectory_callback=lambda iteration, mean: states.append(mean.astype(np.float32)))
+        if name == 'early':
+            expected = manifest['metrics'][ds]['accuracy_curve'][:args.iterations]
+            if not np.array_equal(np.asarray(curve), np.asarray(expected)):
+                raise RuntimeError('Early BA trajectory differs from formal Fig. 5c/scGPT reference')
+            if args.iterations == int(protocol['gen_iters']) and not np.allclose(
+                final, reference.pred_late_like_mean.to_numpy(float), atol=1e-6, rtol=0
+            ):
+                raise RuntimeError('Final early predictions differ from formal pretrained CSV')
         np.save(args.outdir / f'{name}_mean_trajectory.npy', np.asarray(states, dtype=np.float32))
         curves[name] = curve
         print(name, 'n_cells', len(idx), 'BA', curve, flush=True)
     np.savez_compressed(args.outdir / 'reference.npz', genes=genes, is_mapped=mapped,
                         true_delta=truth, top_idx=top, early_mean=early_mean, late_mean=late_mean)
     report = {'dataset': ds, 'protocol': protocol, 'iterations': args.iterations,
-              'selection_seed': args.selection_seed, 'max_cells': args.max_cells,
+              'cell_selection': 'all cells in each pseudotime group; no subsampling',
+              'early_matches_formal_curve': True,
+              'runner_sha256': sha256(__file__),
+              'evaluator_sha256': sha256(evaluator.__file__),
               'selected_cells': selected, 'group_available_sizes': {k: int(v.sum()) for k, v in groups.items()},
               'balanced_accuracy_curves': curves, 'reference_csv_sha256': sha256(reference_path),
               'pseudotime_filter': pt_stats, 'checkpoint_load_report': model.checkpoint_load_report,

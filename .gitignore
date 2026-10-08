@@ -1,4 +1,6 @@
 __pycache__/
+.venv/
+venv/
 *.py[cod]
 data/
 source_data/
