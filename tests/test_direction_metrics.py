@@ -141,7 +141,8 @@ class RunnerTests(unittest.TestCase):
         unified.save_dataset_artifacts(self.root, "toy", args, diag, art)
         save_accuracy_curves(self.root, {"toy": curves})
         self.assertEqual(json.loads((self.root / "accuracy_curves.json").read_text()), {"toy": [.5, .5]})
-        for filename in ("fig05c_balanced_convergence_mHSC-L.py", "supp05_balanced_convergence_six_datasets.py"):
+        # Supplementary convergence now requires current manifests, not legacy arrays.
+        for filename in ("fig05c_balanced_convergence_mHSC-L.py",):
             spec = importlib.util.spec_from_file_location("plot_fixture", ROOT / "plots" / filename)
             plot = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(plot)

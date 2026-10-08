@@ -185,6 +185,7 @@ These examples retain default TF filtering. EPR ranks by absolute weight and use
 | Analysis | Entry point |
 | --- | --- |
 | Formal scGPT gene results | [run_scgpt_gene_results.py](upstream/dynamics/run_scgpt_gene_results.py) |
+| Supplementary mDC scGPT run | [run_scgpt_supplementary_mdc.py](upstream/dynamics/run_scgpt_supplementary_mdc.py): append the sixth dataset using the same validated loaded model and protocol as the five-dataset reference. |
 | Matched random/pretrained scGPT | [run_random_scgpt_seeded.py](upstream/dynamics/run_random_scgpt_seeded.py); builder: [build_random_scgpt_model.py](upstream/dynamics/build_random_scgpt_model.py). |
 | scGPT initial-state sensitivity | [run_scgpt_initial_state.py](upstream/dynamics/run_scgpt_initial_state.py) |
 | Other model probes | [Geneformer](upstream/dynamics/run_geneformer_balanced.py), [LangCell](upstream/dynamics/run_langcell_balanced.py), [scFoundation](upstream/dynamics/run_scfoundation_balanced.py), [scPRINT](upstream/dynamics/run_scprint_pseudotime.py). |
@@ -236,6 +237,29 @@ The initial-state output directory must be new. All cells in each starting group
 
 The panels share the configured font/page dimensions and export PDF/SVG, PNG and source/provenance files. A single trajectory has no replicate-based error bars; gene-wise correlation P values are descriptive.
 
+### 6.4.1 Supplementary Figs. 3/4: six matched current scGPT datasets
+
+Reuse the five pretrained outputs above and run only mDC into a new directory:
+
+```sh
+python upstream/dynamics/run_scgpt_supplementary_mdc.py \
+  --reference-dir outputs/fig06a_current/pretrained \
+  --outdir outputs/supplementary_current/mdc
+python plots/supp05_balanced_convergence_six_datasets.py \
+  --curves-json /path/previous_curves_all_models.json \
+  --pretrained-dir outputs/fig06a_current/pretrained \
+  --supplemental-dir outputs/supplementary_current/mdc \
+  --outdir outputs/supplementary_current/fig3
+python plots/supp03_gene_change_scatter_six_datasets.py \
+  --pretrained-dir outputs/fig06a_current/pretrained \
+  --supplemental-dir outputs/supplementary_current/mdc \
+  --outdir outputs/supplementary_current/fig4
+```
+
+If the five-dataset run predates the optional trajectory recorder, provide its checksum-matching archived evaluator with `--reference-evaluator /path/reference/run_scgpt_gene_results.py`. The runner accepts only that recorder addition with identical inference AST; other source/checkpoint/model mismatches stop the run. The appended mDC preprocessing seed is 20261013, preserving the five established reference seeds. Configure expression/pseudotime/model paths in the formal evaluator before generating a new reference.
+
+Supplementary Fig. 3 keeps the original first 11 displayed iterations (`--iterations 16` shows the complete run) and exports all 16 steps. It replaces all six scGPT curves, with other supplied model curves preserved. Supplementary Fig. 4 displays all mapped genes at step 16. Both validate CSV checksums and the shared model/protocol. The supplied SI template uses `SL/SL3.pdf` for convergence and `SL/SL4.pdf` for gene-change scatter; historical script numbers are retained for compatibility.
+
 ### 6.5 Fig. 6c/d: trajectories and rewired controls
 
 The trajectory generator performs preflight by default; `--execute` runs inference. Supply expression/pseudotime roots, scGPT source/model directories and a new output directory. Defaults are EMA retention 0.9, 32 iterations, up to 16 cells per group, batch size 4 and seed 0; these differ from the formal 16-iteration/all-cell Fig. 5 recipe. It exports group mean trajectories and protocol metadata.
@@ -275,14 +299,14 @@ Use outputs from the corresponding analyses and configure input/output locations
 | Fig. 4f | [fig04f_tf_enrichment_hESC.py](plots/fig04f_tf_enrichment_hESC.py): TF enrichment. |
 | Fig. 5b | [fig05b_scgpt_umap_mHSC-L.py](plots/fig05b_scgpt_umap_mHSC-L.py): joint observed/generated-cell UMAP. |
 | Fig. 5c/d/e | Combined [fig05_scgpt_panels.py](plots/fig05_scgpt_panels.py); individual entries [c](plots/fig05c_balanced_convergence_mHSC-L.py), [d](plots/fig05d_initial_state_mHSC-L.py), [e](plots/fig05e_gene_change_scatter_mHSC-L.py). See Section 6.4. |
-| Fig. 5f | [fig05f_balanced_accuracy_five_datasets.py](plots/fig05f_balanced_accuracy_five_datasets.py): supplied five-dataset BA summary, excluding mDC; does not recompute predictions. |
+| Fig. 5f | [fig05f_balanced_accuracy_five_datasets.py](plots/fig05f_balanced_accuracy_five_datasets.py): supplied five-dataset BA summary, excluding mDC; 14/16 pt DejaVu Sans and the same page/axes height as Fig. 5c/d/e; does not recompute predictions. |
 | Fig. 6a | [fig06a_pretrained_vs_random_scgpt.py](plots/fig06a_pretrained_vs_random_scgpt.py): matched ten-seed control. |
 | Fig. 6c | [fig06c_plot_density_hESC.py](plots/fig06c_plot_density_hESC.py): propagation versus density. |
 | Fig. 6d | [fig06d_cross_dataset_grn_propagation.py](plots/fig06d_cross_dataset_grn_propagation.py): cross-dataset coupling. |
 | Supplementary UMAP | [supp01_scgpt_umap_six_datasets.py](plots/supp01_scgpt_umap_six_datasets.py) |
 | Supplementary attention heads | [supp02_scgpt_attention_heads_hESC.py](plots/supp02_scgpt_attention_heads_hESC.py) |
-| Supplementary gene changes | [supp03_gene_change_scatter_six_datasets.py](plots/supp03_gene_change_scatter_six_datasets.py) |
-| Supplementary convergence | [supp05_balanced_convergence_six_datasets.py](plots/supp05_balanced_convergence_six_datasets.py) |
+| Supplementary Fig. 4 gene changes | [supp03_gene_change_scatter_six_datasets.py](plots/supp03_gene_change_scatter_six_datasets.py): checksum-validated current native-binning results; all mapped genes, 16 steps, EMA 0.9. Supply `--pretrained-dir`, `--supplemental-dir` for the mDC run, and `--outdir`. |
+| Supplementary Fig. 3 convergence | [supp05_balanced_convergence_six_datasets.py](plots/supp05_balanced_convergence_six_datasets.py): six current native-binning scGPT curves, with other supplied model curves preserved; provide `--curves-json`, `--pretrained-dir`, `--supplemental-dir`, and `--outdir`. Defaults to the original 11 displayed steps; exports all 16 steps as source data. |
 
 Shared palettes: [fig2_palette.py](plots/fig2_palette.py), [fig3_palette.py](plots/fig3_palette.py), [fig4_palette.py](plots/fig4_palette.py). Supplementary UMAP uses native per-cell binning and EMA retention 0.9, resetting seed 42 per dataset. Each panel fits its own scaler/PCA/UMAP; coordinates across panels are not one shared embedding. Configure `ROOT`, `SCGPT_REPO`, `MODEL_DIR` before execution.
 
@@ -307,6 +331,7 @@ For CPU-only PyTorch, install the matching CPU wheel first using the official ve
 | [test_scgpt_dynamics_protocol.py](tests/test_scgpt_dynamics_protocol.py) | Mapped binning, EMA, frozen inputs and export. |
 | [test_fig04a_candidates.py](tests/test_fig04a_candidates.py) | Matched curve/reference candidate spaces. |
 | [test_fig05_current_protocol.py](tests/test_fig05_current_protocol.py) | Current source/protocol and initial-state trajectories. |
+| [test_supplementary_current_protocol.py](tests/test_supplementary_current_protocol.py) | Six current scGPT curves, preserved other models, rejected missing/mismatched mDC and inconsistent endpoints. |
 | [test_fig06a_seeded_protocol.py](tests/test_fig06a_seeded_protocol.py) | Condition inputs, manifests and safe reuse. |
 | [test_fig06c_direction.py](tests/test_fig06c_direction.py) | Orientation and matching observed/null sources. |
 

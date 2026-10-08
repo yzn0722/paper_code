@@ -282,7 +282,7 @@ def plot_accuracy_comparison(
     for bar_x, run_accs in zip(random_x, random_run_accs):
         offsets = np.linspace(-0.08, 0.08, len(run_accs))
         ax.scatter(bar_x + offsets, np.asarray(run_accs) * 100.0,
-                   s=13, color='#173D50', edgecolors='white', linewidths=0.25,
+                   s=26, color='#173D50', edgecolors='white', linewidths=0.25,
                    alpha=0.95, zorder=6)
 
     # 绘制权重结果柱状图 - 向右偏移

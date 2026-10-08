@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -29,6 +30,10 @@ DEFAULT_OUTPUT = ROOT / "outputs/fig05f_balanced_accuracy_five_datasets.pdf"
 MODELS = ("scCello", "scPRINT", "scGPT", "Geneformer", "LangCell", "scFoundation")
 DATASETS = ("hESC", "hHep", "mHSC-E", "mHSC-GM", "mHSC-L")
 EXCLUDED_DATASET = "mDC"
+
+# Shared physical heights and typography with Fig. 5c/d/e; wider for five groups.
+PAGE_SIZE_PT = (638.4, 326.2515563964844)
+AXES_BOUNDS_PT = (53.303125, 40.13125, 573.6, 277.2)
 
 
 def read_balanced_accuracy(path: Path) -> dict[str, dict[str, float]]:
@@ -75,16 +80,21 @@ def plot(table: dict[str, dict[str, float]], output: Path) -> None:
     apply_fig4_style()
     plt.rcParams.update({
         "font.family": "sans-serif",
-        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-        "font.size": 10,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-        "legend.fontsize": 9,
+        "font.sans-serif": ["DejaVu Sans"],
+        "font.size": 14,
+        "axes.labelsize": 16,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "legend.fontsize": 14,
         "pdf.fonttype": 42,
         "svg.fonttype": "none",
+        "savefig.bbox": None,
     })
-    fig, ax = plt.subplots(figsize=(7.2, 4.1))
+    page_width, page_height = PAGE_SIZE_PT
+    left, bottom, axes_width, axes_height = AXES_BOUNDS_PT
+    fig = plt.figure(figsize=(page_width / 72, page_height / 72))
+    ax = fig.add_axes([left / page_width, bottom / page_height,
+                      axes_width / page_width, axes_height / page_height])
     x = list(range(len(DATASETS)))
     slot = 0.126
     width = 0.115
@@ -110,8 +120,8 @@ def plot(table: dict[str, dict[str, float]], output: Path) -> None:
     ax.grid(False)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(0.8)
-    ax.spines["bottom"].set_linewidth(0.8)
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.08),
@@ -120,9 +130,18 @@ def plot(table: dict[str, dict[str, float]], output: Path) -> None:
         columnspacing=0.75,
         handlelength=1.0,
         handletextpad=0.25,
+        borderpad=0,
+        borderaxespad=0,
     )
-    fig.subplots_adjust(left=0.115, right=0.995, top=0.985, bottom=0.25)
     output.parent.mkdir(parents=True, exist_ok=True)
+    fig.canvas.draw()
+    scale = 72 / fig.dpi
+    layout = {"page_size_pt": (fig.get_size_inches() * 72).tolist(),
+              "axes_bounds_pt": [[v * scale for v in ax.get_window_extent().bounds]],
+              "reference_panels": "Fig. 5c/d/e",
+              "font_family": "DejaVu Sans", "tick_and_legend_font_pt": 14,
+              "axis_label_font_pt": 16, "legend_position": "below, single row"}
+    output.with_suffix(".layout.json").write_text(json.dumps(layout, indent=2) + "\n")
     fig.savefig(output, metadata={"Title": "Figure 5f: five-dataset balanced accuracy"})
     fig.savefig(output.with_suffix(".png"), dpi=600)
     fig.savefig(output.with_suffix(".svg"))

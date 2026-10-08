@@ -1,312 +1,168 @@
-# #!/usr/bin/env python3
-# from __future__ import annotations
-
-# import json
-# import sys
-# from pathlib import Path
-
-# import numpy as np
-# import pandas as pd
-# from sklearn.metrics import balanced_accuracy_score
-
-# FIG4 = Path("/mnt/10T/yzn/scGRN-Bench/FBplot/fig4")
-# WORK = FIG4 / "balanced_convergence_work"
-# OUT = FIG4 / "convergence"
-# sys.path.insert(0, str(FIG4))
-
-# from fig4_palette import apply_fig4_style, model_color  # noqa: E402
-
-# DATASETS = ["hESC", "hHep", "mDC", "mHSC-E", "mHSC-GM", "mHSC-L"]
-# MAX_ITER = 11
-
-# SAVED_MODELS = {
-#     "scGPT": (
-#         Path("/mnt/10T/yzn/benchmark_GRN/dyn4_results_unified/scgpt"),
-#         "pred_delta_by_iter.npy",
-#         1.0,
-#         FIG4 / "interation/scgpt_accuracy_curves.json",
-#     ),
-#     "scPRINT": (
-#         Path("/mnt/10T/yzn/benchmark_GRN/pre_scprint_results_unified/scprint"),
-#         "pred_delta_by_iter.npy",
-#         1.0,
-#         FIG4 / "interation/scprint_accuracy_curves.json",
-#     ),
-#     "scCello": (
-#         Path("/mnt/10T/yzn/benchmark_GRN/pre_sccello_results_unified/sccello"),
-#         "mean_rank_delta_by_iter.npy",
-#         -1.0,
-#         FIG4 / "interation/sccello_accuracy_curves.json",
-#     ),
-# }
-
-# RERUN_JSONS = {
-#     "Geneformer": WORK / "geneformer_balanced_accuracy_curves.json",
-#     "LangCell": WORK / "langcell_balanced_accuracy_curves.json",
-#     "scFoundation": WORK / "scfoundation_balanced_accuracy_curves.json",
-# }
-
-
-# def scores(pred_delta: np.ndarray, true_delta: np.ndarray, idx: np.ndarray) -> tuple[float, float]:
-#     truth = np.where(true_delta[idx] > 0, 1, -1)
-#     pred = np.where(pred_delta[idx] > 0, 1, -1)
-#     acc = float(np.mean(pred == truth))
-#     pos = truth == 1
-#     neg = truth == -1
-#     # Match sklearn and the existing balance.py implementation. If only one
-#     # truth class is present (mDC top-30%), this reduces to that class's recall.
-#     ba = float(balanced_accuracy_score(truth, pred))
-#     return acc, ba
-
-
-# def load_saved_model(name: str, root: Path, array_name: str, sign: float, ref_json: Path):
-#     reference = json.loads(ref_json.read_text(encoding="utf-8"))
-#     curves: dict[str, list[float]] = {}
-#     for ds in DATASETS:
-#         ds_dir = root / "per_dataset" / ds
-#         frame = pd.read_csv(ds_dir / "per_gene_final_changes.csv")
-#         true_delta = pd.to_numeric(frame["true_delta"], errors="raise").to_numpy(float)
-#         idx = np.flatnonzero(frame["in_top_eval"].astype(bool).to_numpy())
-#         pred_by_iter = np.load(ds_dir / array_name).astype(float) * sign
-#         acc_curve, ba_curve = [], []
-#         for row in pred_by_iter:
-#             acc, ba = scores(row, true_delta, idx)
-#             acc_curve.append(acc)
-#             ba_curve.append(ba)
-#         ref = np.asarray(reference[ds], dtype=float)
-#         got = np.asarray(acc_curve[: len(ref)], dtype=float)
-#         max_diff = float(np.max(np.abs(got - ref)))
-#         if max_diff > 1e-7:
-#             raise RuntimeError(f"{name}/{ds}: saved arrays do not reproduce source accuracy (max diff={max_diff})")
-#         print(f"validated {name:8s} {ds:7s}: max accuracy diff={max_diff:.3g}")
-#         curves[ds] = ba_curve
-#     return curves
-
-
-# def collect_curves() -> dict[str, dict[str, list[float]]]:
-#     result = {}
-#     for name, args in SAVED_MODELS.items():
-#         result[name] = load_saved_model(name, *args)
-#     for name, path in RERUN_JSONS.items():
-#         if not path.is_file():
-#             raise FileNotFoundError(f"Waiting for rerun output: {path}")
-#         result[name] = json.loads(path.read_text(encoding="utf-8"))
-#     return result
-
-
-# def plot(curves: dict[str, dict[str, list[float]]]):
-#     import matplotlib.pyplot as plt
-
-#     apply_fig4_style()
-#     order = ["Geneformer", "LangCell", "scGPT", "scFoundation", "scPRINT", "scCello"]
-#     OUT.mkdir(parents=True, exist_ok=True)
-#     for ds in DATASETS:
-#         fig, ax = plt.subplots(figsize=(5.0, 5.0))
-#         for name in order:
-#             y = np.asarray(curves[name][ds], dtype=float)[:MAX_ITER] * 100.0
-#             x = np.arange(1, len(y) + 1)
-#             ax.plot(x, y, marker="o", linestyle="-", linewidth=2.4, markersize=8,
-#                     alpha=0.85, color=model_color(name), label=name)
-#         ax.set_xlabel("Iteration", fontsize=16)
-#         ax.set_ylabel("Balanced Accuracy(%)", fontsize=16)
-#         ax.set_xlim(1, MAX_ITER)
-#         ax.set_xticks(np.arange(1, MAX_ITER + 1, 2))
-#         ax.set_ylim(0, 100)
-#         ax.set_yticks(np.arange(0, 101, 20))
-#         ax.grid(False)
-#         for side in ["bottom", "left"]:
-#             ax.spines[side].set_visible(True)
-#             ax.spines[side].set_linewidth(1.2)
-#             ax.spines[side].set_color("black")
-#         ax.spines["top"].set_visible(False)
-#         ax.spines["right"].set_visible(False)
-#         ax.legend(loc="lower right", frameon=False, ncol=2, fontsize=14,
-#                   handlelength=1.6, handletextpad=0.5, labelspacing=0.3,
-#                   borderaxespad=0.3, columnspacing=0.8)
-#         path = OUT / f"convergence_models_{ds}_balanced_accuracy.pdf"
-#         fig.savefig(path, bbox_inches="tight", dpi=600)
-#         plt.close(fig)
-#         print(f"saved {path}")
-
-
-# def main():
-#     curves = collect_curves()
-#     WORK.mkdir(parents=True, exist_ok=True)
-#     (WORK / "balanced_accuracy_curves_all_models.json").write_text(
-#         json.dumps(curves, indent=2), encoding="utf-8"
-#     )
-#     plot(curves)
-
-
-# if __name__ == "__main__":
-#     main()
-
-
-
 #!/usr/bin/env python3
-from __future__ import annotations
+"""SI Fig. 3: update six scGPT refinement curves from current validated runs.
 
+Other model curves are preserved from the supplied JSON. Display the original
+11 steps by default; export every supplied step to the source-data CSV.
+"""
+import argparse
+import csv
 import json
-import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "upstream" / "dynamics"))
-from direction_metrics import EPS_DIR, direction_scores
 
-FIG4 = Path("/mnt/10T/yzn/scGRN-Bench/FBplot/fig4")
-WORK = FIG4 / "balanced_convergence_work"
-OUT = FIG4 / "convergence"
-sys.path.insert(0, str(FIG4))
+from audit_panel_alignment import require_matplotlib_panel_alignment
+from fig05_scgpt_panels import load_pretrained, file_sha
+from fig4_palette import apply_fig4_style, model_color
 
-from fig4_palette import apply_fig4_style, model_color  # noqa: E402
-
-DATASETS = ["hESC", "hHep", "mDC", "mHSC-E", "mHSC-GM", "mHSC-L"]
-MAX_ITER = 11
-
-SAVED_MODELS = {
-    "scGPT": (
-        Path("/mnt/10T/yzn/benchmark_GRN/dyn4_results_unified/scgpt"),
-        "pred_delta_by_iter.npy",
-        1.0,
-        FIG4 / "interation/scgpt_accuracy_curves.json",
-    ),
-    "scPRINT": (
-        Path("/mnt/10T/yzn/benchmark_GRN/pre_scprint_results_unified/scprint"),
-        "pred_delta_by_iter.npy",
-        1.0,
-        FIG4 / "interation/scprint_accuracy_curves.json",
-    ),
-    "scCello": (
-        Path("/mnt/10T/yzn/benchmark_GRN/pre_sccello_results_unified/sccello"),
-        "mean_rank_delta_by_iter.npy",
-        -1.0,
-        FIG4 / "interation/sccello_accuracy_curves.json",
-    ),
-}
-
-RERUN_JSONS = {
-    "Geneformer": WORK / "geneformer_balanced_accuracy_curves.json",
-    "LangCell": WORK / "langcell_balanced_accuracy_curves.json",
-    "scFoundation": WORK / "scfoundation_balanced_accuracy_curves.json",
-}
+DATASETS = ('hESC', 'hHep', 'mDC', 'mHSC-E', 'mHSC-GM', 'mHSC-L')
+MODELS = ('Geneformer', 'LangCell', 'scGPT', 'scFoundation', 'scPRINT', 'scCello')
+PAGE_SIZE_PT = (344.80938720703125, 326.2515563964844)
+AXES_BOUNDS_PT = (53.303125, 40.13125, 279.0, 277.2)
 
 
-def scores(pred_delta: np.ndarray, true_delta: np.ndarray, idx: np.ndarray,
-           eps: float = EPS_DIR) -> tuple[float, float]:
-    result = direction_scores(pred_delta, true_delta, idx, eps)
-    return result["ordinary_accuracy"], result["balanced_accuracy"]
+def collect_curves(original_path, pretrained, supplemental):
+    original = json.loads(original_path.read_text())
+    if set(original) != set(MODELS):
+        raise ValueError('Expected all six model curves')
+    curves = json.loads(json.dumps(original))
+    reference = json.loads((pretrained / 'seed_manifest.json').read_text())
+    sources = {}
+    protocol_keys = ('version', 'input_processing', 'pt_quantile', 'top_percent',
+                     'gen_iters', 'ema_alpha', 'no_log1p', 'eps_dir',
+                     'checkpoint_sha256', 'args_sha256', 'vocab_sha256')
+    for dataset in DATASETS:
+        folder = pretrained if (pretrained / (dataset + '_gene_result.csv')).exists() else supplemental
+        if folder is None:
+            raise ValueError('Missing current scGPT result: ' + dataset)
+        manifest, frame = load_pretrained(folder, dataset)
+        protocol = manifest['protocol']
+        if (protocol['gen_iters'] != 16 or protocol['pt_quantile'] != .2
+                or protocol['top_percent'] != 30 or not protocol['no_log1p']):
+            raise ValueError('Expected current native-binning 16-step scGPT protocol')
+        if manifest['model_sha256'] != reference['model_sha256']:
+            raise ValueError('scGPT loaded model differs across datasets')
+        if any(protocol[key] != reference['protocol'][key] for key in protocol_keys):
+            raise ValueError('Protocol mismatch: ' + dataset)
+        metric = manifest['metrics'][dataset]
+        curve = np.asarray(metric['accuracy_curve'], dtype=float)
+        if curve.shape != (16,) or not np.isfinite(curve).all() or ((curve < 0) | (curve > 1)).any():
+            raise ValueError('Invalid current scGPT curve: ' + dataset)
+        if not np.isclose(curve[-1], metric['balanced_accuracy_top30'], rtol=0, atol=1e-12):
+            raise ValueError('Last step differs from checksum-validated gene-level BA')
+        curves['scGPT'][dataset] = curve.tolist()
+        sources[dataset] = {
+            'manifest_sha256': file_sha(folder / 'seed_manifest.json'),
+            'gene_csv_sha256': file_sha(folder / (dataset + '_gene_result.csv')),
+            'model_sha256': manifest['model_sha256'], 'protocol': protocol,
+            'mapped_genes': int(frame.is_mapped.sum()),
+            'top30_genes': int(frame.in_eval.sum()),
+            'iteration16_balanced_accuracy': float(curve[-1]),
+        }
+    for model in MODELS:
+        if set(curves[model]) != set(DATASETS):
+            raise ValueError('Expected all six datasets: ' + model)
+        for dataset in DATASETS:
+            curve = np.asarray(curves[model][dataset], dtype=float)
+            if curve.shape != (16,) or not np.isfinite(curve).all() or ((curve < 0) | (curve > 1)).any():
+                raise ValueError('Invalid 16-step curve: ' + model + '/' + dataset)
+        if model != 'scGPT' and curves[model] != original[model]:
+            raise AssertionError('Non-scGPT curve changed')
+    return original, curves, sources
 
 
-def load_saved_model(name: str, root: Path, array_name: str, sign: float, ref_json: Path):
-    metadata_path = root / "metric_metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else None
-    eps = float(metadata["eps_dir"]) if metadata else EPS_DIR
-    if metadata:
-        if metadata.get("metric") != "balanced_accuracy" or metadata.get("metric_version") != 1:
-            raise ValueError(f"Unsupported metric metadata: {metadata_path}")
-        reference_path = root / "balanced_accuracy_curves.json"
-    else:
-        reference_path = ref_json
-        print(f"{name}: validating legacy ordinary-accuracy reference; recalculating BA with eps={eps}")
-    reference = json.loads(reference_path.read_text(encoding="utf-8"))
-    curves: dict[str, list[float]] = {}
-    for ds in DATASETS:
-        ds_dir = root / "per_dataset" / ds
-        frame = pd.read_csv(ds_dir / "per_gene_final_changes.csv")
-        true_delta = pd.to_numeric(frame["true_delta"], errors="raise").to_numpy(float)
-        idx = np.flatnonzero(frame["in_top_eval"].astype(bool).to_numpy())
-        pred_by_iter = np.load(ds_dir / array_name).astype(float) * sign
-        acc_curve, ba_curve = [], []
-        for row in pred_by_iter:
-            acc, ba = scores(row, true_delta, idx, eps)
-            if metadata is None:
-                # Historical files encoded exact-zero prediction/truth as Down.
-                # Reproduce only for provenance validation, never for the new BA.
-                acc = float(np.mean(np.where(row[idx] > 0, 1, -1)
-                                    == np.where(true_delta[idx] > 0, 1, -1)))
-            acc_curve.append(acc)
-            ba_curve.append(ba)
-        ref = np.asarray(reference[ds], dtype=float)
-        got = np.asarray((ba_curve if metadata else acc_curve)[: len(ref)], dtype=float)
-        if got.shape != ref.shape or not np.allclose(got, ref, atol=1e-7, rtol=0, equal_nan=True):
-            raise RuntimeError(f"{name}/{ds}: saved arrays do not reproduce {reference_path}")
-        finite = np.isfinite(got) & np.isfinite(ref)
-        max_diff = float(np.max(np.abs(got[finite] - ref[finite]))) if finite.any() else 0.0
-        if max_diff > 1e-7:
-            raise RuntimeError(f"{name}/{ds}: saved arrays do not reproduce source metric (max diff={max_diff})")
-        print(f"validated {name:8s} {ds:7s}: max source-metric diff={max_diff:.3g}")
-        curves[ds] = ba_curve
-    return curves
+def draw_panel(ax, curves, dataset, iterations, legend=False):
+    for model in MODELS:
+        y = np.asarray(curves[model][dataset][:iterations], dtype=float) * 100
+        ax.plot(np.arange(1, iterations + 1), y, marker='o', lw=2.4,
+                ms=8, alpha=.85, color=model_color(model), label=model)
+    ax.set(xlim=(.8, iterations + .2), ylim=(0, 100),
+           xlabel='Iteration', ylabel='Balanced accuracy (%)')
+    ax.set_xticks(np.arange(1, iterations + 1, 2))
+    ax.set_yticks(np.arange(0, 101, 20))
+    ax.axhline(50, color='gray', ls='--', lw=1.2, alpha=.8, zorder=0)
+    ax.grid(False)
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.tick_params(length=0)
+    if legend:
+        ax.legend(loc='lower right', frameon=False, ncol=2, fontsize=14,
+                  handlelength=1.6, handletextpad=.5, labelspacing=.3,
+                  borderaxespad=.3, columnspacing=.8)
 
 
-def collect_curves() -> dict[str, dict[str, list[float]]]:
-    result = {}
-    for name, args in SAVED_MODELS.items():
-        result[name] = load_saved_model(name, *args)
-    for name, path in RERUN_JSONS.items():
-        if not path.is_file():
-            raise FileNotFoundError(f"Waiting for rerun output: {path}")
-        result[name] = json.loads(path.read_text(encoding="utf-8"))
-    return result
-
-
-def plot(curves: dict[str, dict[str, list[float]]]):
-    import matplotlib.pyplot as plt
-
-    apply_fig4_style()
-    order = ["Geneformer", "LangCell", "scGPT", "scFoundation", "scPRINT", "scCello"]
-    OUT.mkdir(parents=True, exist_ok=True)
-    for ds in DATASETS:
-        fig, ax = plt.subplots(figsize=(5.0, 5.0))
-        for name in order:
-            y = np.asarray(curves[name][ds], dtype=float)[:MAX_ITER] * 100.0
-            x = np.arange(1, len(y) + 1)
-            ax.plot(x, y, marker="o", linestyle="-", linewidth=2.4, markersize=8,
-                    alpha=0.85, color=model_color(name), label=name)
-        ax.set_xlabel("Iteration", fontsize=16)
-        ax.set_ylabel("Balanced Accuracy(%)", fontsize=16)
-        ax.set_xlim(1, MAX_ITER)
-        ax.set_xticks(np.arange(1, MAX_ITER + 1, 2))
-        ax.set_ylim(0, 100)
-        ax.set_yticks(np.arange(0, 101, 20))
-
-        # ===== 新增：在 50% 处画一条横向虚线 =====
-        ax.axhline(
-            y=50.0,
-            color="gray",      # 颜色，可改成 "#888888" / "black" 等
-            linestyle="--",    # 虚线
-            linewidth=1.2,     # 线宽
-            alpha=0.8,         # 透明度
-            zorder=0,          # 画在曲线下方，避免遮挡
-        )
-        # =======================================
-
-        ax.grid(False)
-        for side in ["bottom", "left"]:
-            ax.spines[side].set_visible(True)
-            ax.spines[side].set_linewidth(1.2)
-            ax.spines[side].set_color("black")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.legend(loc="lower right", frameon=False, ncol=2, fontsize=14,
-                  handlelength=1.6, handletextpad=0.5, labelspacing=0.3,
-                  borderaxespad=0.3, columnspacing=0.8)
-        path = OUT / f"convergence_models_{ds}_balanced_accuracy.pdf"
-        fig.savefig(path, bbox_inches="tight", dpi=600)
-        plt.close(fig)
-        print(f"saved {path}")
+def export(fig, folder, name):
+    fig.canvas.draw()
+    scale = 72 / fig.dpi
+    layout = {'page_size_pt': (fig.get_size_inches() * 72).tolist(),
+              'axes_bounds_pt': [[v * scale for v in ax.get_window_extent().bounds]
+                                 for ax in fig.axes]}
+    (folder / (name + '.layout.json')).write_text(json.dumps(layout, indent=2) + '\n')
+    fig.savefig(folder / (name + '.pdf'), dpi=600)
+    fig.savefig(folder / (name + '.svg'), dpi=600)
+    fig.savefig(folder / (name + '.png'), dpi=600)
+    plt.close(fig)
 
 
 def main():
-    curves = collect_curves()
-    WORK.mkdir(parents=True, exist_ok=True)
-    (WORK / "balanced_accuracy_curves_all_models.json").write_text(
-        json.dumps(curves, indent=2), encoding="utf-8"
-    )
-    plot(curves)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--curves-json', type=Path, required=True)
+    parser.add_argument('--pretrained-dir', type=Path, required=True)
+    parser.add_argument('--supplemental-dir', type=Path, required=True)
+    parser.add_argument('--outdir', type=Path, required=True)
+    parser.add_argument('--iterations', type=int, default=11)
+    args = parser.parse_args()
+    if not 1 <= args.iterations <= 16:
+        parser.error('--iterations must be between 1 and 16')
+    original, curves, sources = collect_curves(args.curves_json, args.pretrained_dir, args.supplemental_dir)
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    single = args.outdir / 'individual'
+    single.mkdir(exist_ok=True)
+    apply_fig4_style()
+    plt.rcParams.update({'font.family': 'sans-serif', 'font.sans-serif': ['DejaVu Sans'],
+                        'font.size': 14, 'axes.labelsize': 16, 'axes.titlesize': 16,
+                        'xtick.labelsize': 14, 'ytick.labelsize': 14, 'legend.fontsize': 14,
+                        'pdf.fonttype': 42, 'svg.fonttype': 'none',
+                        'savefig.bbox': None, 'figure.dpi': 100})
+    for dataset in DATASETS:
+        width, height = PAGE_SIZE_PT
+        left, bottom, aw, ah = AXES_BOUNDS_PT
+        fig = plt.figure(figsize=(width / 72, height / 72))
+        ax = fig.add_axes([left / width, bottom / height, aw / width, ah / height])
+        draw_panel(ax, curves, dataset, args.iterations, legend=True)
+        export(fig, single, 'convergence_models_' + dataset + '_balanced_accuracy')
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.subplots_adjust(left=.09, right=.98, bottom=.16, top=.94, wspace=.30, hspace=.35)
+    for dataset, ax in zip(DATASETS, axes.flat):
+        draw_panel(ax, curves, dataset, args.iterations)
+        ax.set_title(dataset, pad=12)
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(.5, .025),
+               ncol=6, frameon=False, fontsize=14, handlelength=1.6,
+               handletextpad=.5, columnspacing=.8)
+    require_matplotlib_panel_alignment(fig, json_out=args.outdir / 'panel_alignment.json')
+    export(fig, args.outdir, 'Supplementary_Fig_3_balanced_convergence_six_datasets')
+    (args.outdir / 'balanced_accuracy_curves_all_models.json').write_text(json.dumps(curves, indent=2) + '\n')
+    with (args.outdir / 'Supplementary_Fig_3_source_data.csv').open('w', newline='') as handle:
+        writer = csv.writer(handle)
+        writer.writerow(['dataset', 'model', 'iteration', 'balanced_accuracy', 'displayed', 'source'])
+        for dataset in DATASETS:
+            for model in MODELS:
+                for i, value in enumerate(curves[model][dataset], 1):
+                    writer.writerow([dataset, model, i, repr(value), int(i <= args.iterations),
+                                     'current scGPT manifest' if model == 'scGPT' else 'preserved previous curve'])
+    report = {'complete': True, 'displayed_iterations': args.iterations,
+              'available_iterations': 16, 'datasets': list(DATASETS),
+              'original_curves_sha256': file_sha(args.curves_json),
+              'current_scgpt_sources': sources,
+              'non_scgpt_curves_unchanged': all(curves[m] == original[m] for m in MODELS if m != 'scGPT'),
+              'all_scgpt_endpoints_validated_from_gene_csv': True,
+              'non_scgpt_validation_scope': 'Preserved supplied curves; their model runs were not revalidated.'}
+    (args.outdir / 'provenance.json').write_text(json.dumps(report, indent=2) + '\n')
+    print('PASS: six current scGPT curves; other curves preserved; 16-step source data exported')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
