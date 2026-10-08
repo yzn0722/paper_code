@@ -46,3 +46,8 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [run_langcell_balanced.py](run_langcell_balanced.py)
+
+
+## Logic/protocol update (2026-10-08)
+
+Uses shared langcell_mlm.LangCellModel with strict validation of a trained encoder and MLM head. Set LANGCELL_MLM_MODEL_DIR to a compatible full checkpoint. An encoder-only official LangCell checkpoint is rejected; no random output layer is created.

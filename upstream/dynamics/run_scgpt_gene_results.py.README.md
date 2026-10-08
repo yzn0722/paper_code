@@ -70,3 +70,8 @@ this correction.
 `build_model` uses the sibling [scgpt_checkpoint.py](scgpt_checkpoint.py). Keep the helper beside the evaluator when copying it to the server. Before device transfer or evaluation, all gene/value encoder, transformer and expression decoder weights used by `mlm_output` must exist with matching shapes. Missing/incompatible required weights, unexpected dynamic-backbone keys and conflicting QKV aliases raise `RuntimeError`.
 
 Packed FlashAttention `Wqkv.weight/bias` and PyTorch `in_proj_weight/bias` names are translated without changing tensors. The console reports missing/unexpected keys, shape mismatches and translations despite suppressed Python warnings. `model.checkpoint_load_report` retains the JSON-safe report. Unused auxiliary CLS/MVC/DAB heads may remain unloaded, with explicit diagnostics. Historical result validity still requires loading the real checkpoint and rerunning the analysis.
+
+
+## Logic/protocol update (2026-10-08)
+
+iterative_direction_accuracy optionally accepts trajectory_callback(iteration, population_mean). Each callback receives a copy after the same formal update, preserving default evaluation behavior and preventing recorder mutations from changing scores. This enables protocol-consistent initial-state sensitivity trajectories.

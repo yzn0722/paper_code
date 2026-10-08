@@ -179,6 +179,7 @@ def iterative_direction_accuracy(
     early_mean,
     true_delta,
     top_idx,
+    trajectory_callback=None,
 ):
     device = next(model.parameters()).device
     vals_all = values_tensor.clone()
@@ -210,6 +211,9 @@ def iterative_direction_accuracy(
 
         # Balanced direction accuracy on mapped top-% genes (EPS_DIR; zero ≠ Down).
         pred_mean = vals_all[:, 1:].numpy().mean(axis=0)
+        if trajectory_callback is not None:
+            # Copy prevents a recorder from changing the state used for scoring.
+            trajectory_callback(it + 1, pred_mean.copy())
         pred_delta = pred_mean - early_mean
         acc = balanced_direction_accuracy(pred_delta, true_delta, top_idx)
         acc_curve.append(acc)

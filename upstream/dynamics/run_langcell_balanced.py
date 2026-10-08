@@ -1034,6 +1034,7 @@ LangCell | swap=8 | 全部6数据集 | 输出标准accuracy_curves.json
 """
 
 import json
+import os
 import pickle
 import warnings
 from pathlib import Path
@@ -1041,14 +1042,21 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from transformers import BertModel
+try:
+    from .langcell_mlm import LangCellModel
+except ImportError:  # Direct script execution.
+    from langcell_mlm import LangCellModel
 
 warnings.filterwarnings("ignore")
 
 # =====================================================
 # 固定配置
 # =====================================================
-MODEL_DIR = "/mnt/10T/yzn/benchmark_GRN/model/weights/LangCell/cell_bert"
+# Must contain a trained encoder AND trained MLM head, not official cell_bert alone.
+MODEL_DIR = os.environ.get(
+    "LANGCELL_MLM_MODEL_DIR",
+    "/mnt/10T/yzn/benchmark_GRN/model/weights/LangCell/cell_bert",
+)
 DICTS_DIR = "/mnt/10T/yzn/benchmark_GRN/model/weights/Geneformer/dicts"
 OUT_JSON = "/mnt/10T/yzn/scGRN-Bench/FBplot/fig4/balanced_convergence_work/langcell_balanced_accuracy_curves.json"
 
@@ -1098,19 +1106,6 @@ FIXED_PARAMS = {
 SWAP_TRIALS = 8
 # Align with scFoundation: mapped-only top%; near-zero pred/true are not Up/Down.
 EPS_DIR = 1e-3
-
-# =====================================================
-# LangCell 模型
-# =====================================================
-class LangCellModel(nn.Module):
-    def __init__(self, model_dir: str):
-        super().__init__()
-        self.bert = BertModel.from_pretrained(model_dir, add_pooling_layer=False)
-        self.cls = nn.Linear(self.bert.config.hidden_size, self.bert.config.vocab_size)
-        
-    def forward(self, input_ids, attention_mask):
-        out = self.bert(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-        return self.cls(out.last_hidden_state)
 
 # =====================================================
 # 工具函数

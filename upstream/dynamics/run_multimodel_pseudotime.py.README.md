@@ -190,3 +190,8 @@ CPU regression fixtures cover the 0.75 ordinary accuracy / 0.50 BA example,
 near-zero handling, single/empty classes, model iteration, CSV/JSON export and
 figure loaders. These fixtures use tiny deterministic models; full pretrained
 runs still require the external model dependencies, checkpoints and datasets.
+
+
+## Logic/protocol update (2026-10-08)
+
+LangCell uses the shared strict trained-MLM loader. Supply a compatible full trained checkpoint with --langcell-model-dir. The official encoder-only checkpoint cannot support this swap probe and fails explicitly rather than generating random logits.

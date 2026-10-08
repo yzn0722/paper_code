@@ -39,6 +39,11 @@ except ImportError:  # Direct script execution.
     from direction_metrics import (EPS_DIR, balanced_direction_accuracy,
                                    direction_signs, metric_metadata, save_accuracy_curves)
 
+try:
+    from .langcell_mlm import LangCellModel
+except ImportError:  # Direct script execution.
+    from langcell_mlm import LangCellModel
+
 
 warnings.filterwarnings("ignore")
 
@@ -181,7 +186,12 @@ def parse_args():
     parser.add_argument("--no-log1p", action="store_true", default=False)
     parser.add_argument("--geneformer-model-dir", default="/mnt/10T/yzn/benchmark_GRN/model/weights/Geneformer/default/6L")
     parser.add_argument("--geneformer-dicts-dir", default="/mnt/10T/yzn/benchmark_GRN/model/weights/Geneformer/dicts")
-    parser.add_argument("--langcell-model-dir", default="/mnt/10T/yzn/benchmark_GRN/model/weights/LangCell/cell_bert")
+    parser.add_argument(
+        "--langcell-model-dir",
+        default="/mnt/10T/yzn/benchmark_GRN/model/weights/LangCell/cell_bert",
+        help="Complete trained LangCell BERT MLM checkpoint (encoder + MLM head). "
+             "The official encoder-only cell_bert is rejected.",
+    )
     parser.add_argument("--sccello-model-dir", default="/mnt/10T/yzn/benchmark_GRN/model/weights/scCello")
     parser.add_argument("--sccello-repo-dir", default="/mnt/10T/yzn/benchmark_GRN/sc_foundation_evals", help="Contains sccello/src/*.py")
     parser.add_argument(
@@ -409,19 +419,6 @@ def build_symbol_to_ensembl_map(gene_name_id: Dict[str, str]) -> Dict[str, str]:
     if v_ens > k_ens:
         return {normalize_symbol(k): str(v) for k, v in gene_name_id.items()}
     return {normalize_symbol(v): str(k) for k, v in gene_name_id.items()}
-
-
-class LangCellModel(nn.Module):
-    def __init__(self, model_dir: str):
-        super().__init__()
-        from transformers import BertModel
-
-        self.bert = BertModel.from_pretrained(model_dir, add_pooling_layer=False)
-        self.cls = nn.Linear(self.bert.config.hidden_size, self.bert.config.vocab_size)
-
-    def forward(self, input_ids, attention_mask):
-        out = self.bert(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-        return self.cls(out.last_hidden_state)
 
 
 class ScCelloMaskedLMWrapper(nn.Module):
