@@ -166,7 +166,9 @@ def pairwise_mi_matrix(expr: pd.DataFrame, n_bins: int = 8) -> Tuple[np.ndarray,
     n_states = int(d.max()) + 1
     eye = np.eye(n_states, dtype=np.float64)
     oh = eye[d]  # (n_genes, n_cells, n_states)
-    right = oh.reshape(n_cells, n * n_states)
+    # Keep each cell's gene/state indicators together before flattening.
+    # Reshaping the gene-major array directly pairs different cells.
+    right = oh.transpose(1, 0, 2).reshape(n_cells, n * n_states)
     mi = np.zeros((n, n), dtype=np.float64)
     for i in range(n):
         left = oh[i].T  # (n_states, n_cells)

@@ -62,3 +62,8 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [run_expression_baselines.py](run_expression_baselines.py)
+
+
+## Logic/protocol update (2026-10-08)
+
+MI one-hot data (gene, cell, state) are transposed to (cell, gene, state) before flattening. Joint probabilities therefore preserve the pairing of cell observations; jointly permuting cells does not change MI.
