@@ -38,3 +38,8 @@ These literals may designate inputs, outputs, or templates. Consult their surrou
 Datasets, checkpoints, generated figures, result tables, caches, and logs are excluded. Supply required inputs separately. Server-specific paths may need adjustment. Documentation is based on static source inspection; model execution and end-to-end reproduction have not been tested.
 
 Source: [run_deepsem_batch.py](run_deepsem_batch.py)
+
+
+## Logic/protocol update (2026-10-08)
+
+The test-mode save_name is a directory. Read its actual GRN_inference_result.tsv (TF, Target, EdgeWeight) after successful training; keep signed nonzero weights and rank by absolute strength. Fresh output directories avoid stale reuse. Missing/malformed outputs or failed training raise errors; random substitute networks are never emitted.

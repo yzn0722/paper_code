@@ -10,6 +10,8 @@ import sys
 import pandas as pd
 import numpy as np
 import subprocess
+import tempfile
+from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -23,9 +25,6 @@ TASK_TYPE = "non_celltype_GRN"
 # 4. 结果保存的新文件夹路径
 RESULT_DIR = "/mnt/10T/yzn/benchmark_GRN/DeepSEM_results"
 # ================================================================================
-
-# 创建结果目录（如果不存在）
-os.makedirs(RESULT_DIR, exist_ok=True)
 
 # -------------------------- 步骤1：转置数据 --------------------------
 def transpose_scrna_data(raw_path, transposed_path):
@@ -53,7 +52,38 @@ def transpose_scrna_data(raw_path, transposed_path):
     # ✅ 关键修正：返回原始数据的行索引（基因名），而不是转置后的列名
     return transposed_path, df.index.tolist()  # 这里是基因列表！
 
-# -------------------------- 步骤2：运行DeepSEM并生成正确TSV --------------------------
+# Official DeepSEM --setting test writes regulator/target names in this file.
+# Preserve its direction (TF -> Target); its internal adjacency is receiver-major.
+def read_deepsem_network(result_path, gene_list):
+    result_path = Path(result_path)
+    if not result_path.is_file():
+        raise FileNotFoundError(f"DeepSEM did not write its trained network: {result_path}")
+    frame = pd.read_csv(result_path, sep="\t", dtype=str, keep_default_na=False)
+    if {"TF", "Target", "EdgeWeight"}.issubset(frame.columns):
+        frame = frame.rename(columns={"TF": "Gene1", "Target": "Gene2"})
+    required = ["Gene1", "Gene2", "EdgeWeight"]
+    if not set(required).issubset(frame.columns):
+        raise ValueError(f"Unexpected DeepSEM network columns: {frame.columns.tolist()}")
+    frame = frame[required].copy()
+    genes = [str(g) for g in gene_list]
+    if len(genes) != len(set(genes)):
+        raise ValueError("Expression input contains duplicate gene names")
+    unknown = (set(frame.Gene1) | set(frame.Gene2)) - set(genes)
+    if unknown:
+        raise ValueError(f"DeepSEM output contains unknown gene names: {sorted(unknown)[:10]}")
+    frame["EdgeWeight"] = pd.to_numeric(frame["EdgeWeight"], errors="raise")
+    if not np.isfinite(frame["EdgeWeight"].to_numpy(dtype=float)).all():
+        raise ValueError("DeepSEM output contains non-finite weights")
+    if frame.duplicated(["Gene1", "Gene2"]).any():
+        raise ValueError("DeepSEM output contains duplicate directed edges")
+    frame = frame.loc[(frame.Gene1 != frame.Gene2) & (frame.EdgeWeight != 0)]
+    if frame.empty:
+        raise ValueError("DeepSEM produced no nonzero non-self edges")
+    # Keep all trained nonzero scores, including small/negative weights, unchanged.
+    return frame.sort_values("EdgeWeight", key=abs, ascending=False, kind="stable").reset_index(drop=True)
+
+
+# -------------------------- 步骤2：运行DeepSEM并导出真实网络 --------------------------
 def run_deepsem_grn(transposed_data_path, save_name, task_type, gene_list, dataset_name):
     """运行DeepSEM并生成Gene1/Gene2/EdgeWeight格式TSV（Gene1/Gene2为真实基因名）"""
     print("="*60)
@@ -70,35 +100,32 @@ def run_deepsem_grn(transposed_data_path, save_name, task_type, gene_list, datas
         alpha = 0.1 if dataset_name in ["hESC", "mHSC-E"] else 1
         beta, n_epochs = 0.01, 150
 
-    # 构建命令
-    deepsem_cmd = (
-        f'python "{DEEPSEM_MAIN_PATH}" '
-        f'--task {task_type} '
-        f'--data_file "{transposed_data_path}" '
-        f'--save_name "{save_name}" '
-        f'--setting test '
-        f'--alpha {alpha} '
-        f'--beta {beta} '
-        f'--n_epochs {n_epochs}'
-    )
+    # A fresh run directory prevents an old network from masquerading as new output.
+    save_prefix = Path(save_name).resolve()
+    save_prefix.parent.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix=save_prefix.name + "_", dir=save_prefix.parent))
+    deepsem_cmd = [
+        sys.executable, str(Path(DEEPSEM_MAIN_PATH).resolve()),
+        "--task", task_type, "--data_file", str(Path(transposed_data_path).resolve()),
+        "--save_name", str(run_dir), "--setting", "test",
+        "--alpha", str(alpha), "--beta", str(beta), "--n_epochs", str(n_epochs),
+    ]
     
     print("📝 运行命令：")
-    print(deepsem_cmd)
+    print(subprocess.list2cmdline(deepsem_cmd))
     print()
     print("🚀 开始训练DeepSEM（实时输出Epoch日志）...")
     print("-"*60)
     
-    # 捕获DeepSEM输出日志
-    log_content = []
-    try:
+    # Preserve the actual model output and training log for diagnosis.
+    with (run_dir / "training.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
             deepsem_cmd,
-            shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
             universal_newlines=True,
-            cwd=os.path.dirname(save_name)
+            cwd=run_dir,
         )
         
         # 实时打印日志并保存
@@ -108,65 +135,19 @@ def run_deepsem_grn(transposed_data_path, save_name, task_type, gene_list, datas
                 break
             if line:
                 print(line.strip())
-                log_content.append(line.strip())
+                log.write(line)
         
         return_code = process.poll()
         
-        if return_code == 0:
-            print("-"*60)
-            print("✅ DeepSEM训练完成！")
-            
-            # ========== 核心修正：基于真实基因名生成GRN边 ==========
-            np.random.seed(42)
-            n_genes = len(gene_list)
-            # 生成基因-基因调控矩阵（替代DeepSEM输出）
-            grn_matrix = np.random.uniform(-1, 1, size=(n_genes, n_genes))
-            np.fill_diagonal(grn_matrix, 0)  # 排除自调控
-            
-            # 构建Gene1/Gene2/EdgeWeight边列表（Gene1/Gene2都是基因名）
-            grn_edges = []
-            for i, regulator_gene in enumerate(gene_list):
-                for j, target_gene in enumerate(gene_list):
-                    weight = grn_matrix[i, j]
-                    if abs(weight) > 0.1:  # 过滤小权重边
-                        grn_edges.append({
-                            "Gene1": regulator_gene,
-                            "Gene2": target_gene,
-                            "EdgeWeight": round(weight, 6)
-                        })
-            
-            # 转换为DataFrame并排序
-            df_grn = pd.DataFrame(grn_edges)
-            df_grn = df_grn.sort_values(by="EdgeWeight", key=abs, ascending=False)
-            
-            # 保存为TSV文件
-            model_name = "DeepSEM"
-            tsv_filename = f"{model_name}_{dataset_name}.tsv"
-            tsv_path = os.path.join(RESULT_DIR, tsv_filename)
-            df_grn.to_csv(tsv_path, sep="\t", index=False, encoding="utf-8")
-            
-            print(f"✅ 已生成正确格式TSV文件：{tsv_path}")
-            print(f"📊 GRN边数量：{len(df_grn)}")
-            print(f"📋 列名：Gene1(基因) | Gene2(基因) | EdgeWeight")
-            
-            # 清理临时文件
-            for ext in ["_prediction.csv", "_true.csv", f"_{task_type}.tsv"]:
-                temp_file = f"{save_name}{ext}"
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                    
-        else:
-            print("-"*60)
-            print(f"❌ DeepSEM运行失败（返回码：{return_code}）")
-            df_empty = pd.DataFrame(columns=["Gene1", "Gene2", "EdgeWeight"])
-            tsv_path = os.path.join(RESULT_DIR, f"DeepSEM_{dataset_name}.tsv")
-            df_empty.to_csv(tsv_path, sep="\t", index=False)
-            
-    except Exception as e:
-        print(f"❌ 执行命令失败：{str(e)}")
-        df_empty = pd.DataFrame(columns=["Gene1", "Gene2", "EdgeWeight"])
-        tsv_path = os.path.join(RESULT_DIR, f"DeepSEM_{dataset_name}.tsv")
-        df_empty.to_csv(tsv_path, sep="\t", index=False)
+        if return_code != 0:
+            raise RuntimeError(f"DeepSEM failed with exit code {return_code}; see {run_dir / 'training.log'}")
+
+    frame = read_deepsem_network(run_dir / "GRN_inference_result.tsv", gene_list)
+    destination = Path(RESULT_DIR) / f"DeepSEM_{dataset_name}.tsv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(destination, sep="\t", index=False, encoding="utf-8")
+    print(f"✅ 已导出真实 DeepSEM 网络：{destination} ({len(frame)} edges)")
+    return destination
 
 # -------------------------- 批量主流程 --------------------------
 if __name__ == "__main__":
