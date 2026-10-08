@@ -1,0 +1,3 @@
+# `tests/test_baseline_logic.py`
+
+Regression tests for paired-cell MI, real DeepSEM network exports, and strict trained LangCell MLM loading. Run `python -m unittest discover -s tests -v` from the repository root. Requires NumPy, pandas, SciPy, scikit-learn, PyTorch, and Transformers with safetensors support. Tests use explicit synthetic fixtures and temporary checkpoints; none are manuscript results. Checks include identical/independent gene MI and cell-order invariance, actual subprocess output handling and fail-fast training failures, signed small DeepSEM weights, full MLM logits preservation, and rejection of encoder-only/missing-head checkpoints.
